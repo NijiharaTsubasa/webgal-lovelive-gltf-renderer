@@ -1,0 +1,22 @@
+{
+  "name": "webgal-lovelive-gltf-renderer",
+  "version": "0.0.0",
+  "type": "module",
+  "repository": { "type": "git", "url": "https://github.com/NijiharaTsubasa/webgal-lovelive-gltf-renderer.git" },
+  "exports": {
+    ".": { "types": "./src/offscreen-character.d.ts", "default": "./src/offscreen-character.js" },
+    "./*": "./src/*"
+  },
+  "types": "./src/offscreen-character.d.ts",
+  "main": "./src/offscreen-character.js",
+  "files": ["src"],
+  "scripts": { "test": "node --test --test-concurrency=1 tests/*.test.js tests/*.test.mjs" },
+  "devDependencies": {
+    "vite": "^7.3.1",
+    "playwright": "^1.58.2"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm-springbone": "3.5.5",
+    "three": "^0.185.0"
+  }
+}
