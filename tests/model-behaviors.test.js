@@ -30,6 +30,29 @@ function part(role, component = {}) {
   };
 }
 
+test("PostPhysics is optional and runs after animation/physics with the same snapshot and time", async () => {
+  const calls = [];
+  const registry = new BehaviorRegistry();
+  registry.registerPackage(behaviorPackage("Physics", [{name: "Adjust", script: "adjust.js"}]), {
+    loadModule: async () => ({default: class {
+      constructor(context) { this.context = context; }
+      Update(time) { calls.push(["update", time.deltaTime]); }
+      LateUpdate(time) { calls.push(["late", time.deltaTime]); }
+      PostPhysics(time) { calls.push(["post", time.deltaTime, this.context.getMotionState()]); }
+    }}),
+  });
+  const manager = new BehaviorManager({registry, parts: [part("integrated", {
+    behaviors: [{name: "Physics.Adjust", required: true, parameters: {}}],
+  })], humanoidScale: 1, context: {}});
+  await manager.initialize();
+  manager.beforeMotion(1 / 60, 1);
+  manager.afterMotion();
+  calls.push(["physics"]);
+  manager.afterPhysics();
+  assert.deepEqual(calls, [["update", 1 / 60], ["late", 1 / 60], ["physics"], ["post", 1 / 60, null]]);
+  manager.destroy();
+});
+
 test("Behavior queries expose role-scoped definitions and atomically publish completed evaluation", async () => {
   let context;
   const observations=[];

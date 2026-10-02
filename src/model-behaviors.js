@@ -315,6 +315,10 @@ export class BehaviorManager {
     for (const record of this.records) invokeSync(record, "LateUpdate", this.time);
   }
 
+  afterPhysics() {
+    for (const record of this.records) invokeSync(record, "PostPhysics", this.time);
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;

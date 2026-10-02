@@ -468,8 +468,11 @@ export class CharacterRenderer {
       this.behaviors?.afterMotion();
       this.externalExpressionDriver?.update(step);
     };
-    if (this.physics) this.physics.advance(delta, animate);
-    else animate(delta);
+    if (this.physics) this.physics.advance(delta, animate, () => this.behaviors?.afterPhysics());
+    else {
+      animate(delta);
+      this.behaviors?.afterPhysics();
+    }
     return motionChange;
   }
 

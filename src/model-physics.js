@@ -9,6 +9,7 @@ import {
 import { HUMANOID_BONE_NAMES } from "./skeleton-composer.js";
 import { maximumStretch } from "./physics-math.js";
 import { PhysicsPanelShape } from "./physics-panel.js";
+import { PhysicsEdgeContact } from "./physics-edge.js";
 export { maximumStretch } from "./physics-math.js";
 
 const STEP = 1 / 60;
@@ -56,6 +57,15 @@ export function validatePhysics(value, source = "physics") {
       const key = `${c.node}/${c.primitive}`;
       if (meshes.has(key)) fail(`重复布面 ${key}`);
       meshes.add(key);
+    }
+  }
+  if (value.collisionEdges !== undefined) {
+    if (!Array.isArray(value.collisionEdges)) fail("collisionEdges 必须是数组");
+    for (const edge of value.collisionEdges) {
+      if (!object(edge) || !Array.isArray(edge.springs) || edge.springs.length !== 2
+        || !edge.springs.every((i) => index(i) && i < value.springs.length)
+        || edge.springs[0] === edge.springs[1] || !Array.isArray(edge.colliders)
+        || !edge.colliders.every((i) => index(i) && i < value.colliders.length)) fail("碰撞边或碰撞引用无效");
     }
   }
 }
@@ -129,6 +139,8 @@ export class ModelPhysics {
     this.enabled = true;
     this.records = [];
     this.colliders = [];
+    this.collisionEdges = [];
+    this.edgeContact = new PhysicsEdgeContact();
     this.accumulator = 0;
     this.frameAccumulator = 0;
     this.needsReset = true;
@@ -192,6 +204,7 @@ export class ModelPhysics {
         this.colliders.push(record);
         return record.collider;
       });
+      const springs = [];
       for (const definition of physics.springs) {
         const node = resolve(definition.node);
         if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
@@ -215,8 +228,14 @@ export class ModelPhysics {
           gravityDir: gravity.clone().normalize(), gravityPower: gravity.length(),
         }, [{ colliders: definition.colliders.map((i) => colliders[i]) }]);
         joint.setInitState();
-        this.records.push({ node, definition, anchor, bone, tail, joint, base: node.quaternion.clone() });
+        const record = { node, definition, anchor, bone, tail, joint, base: node.quaternion.clone(),
+          output: node.quaternion.clone(), outputWorld: node.matrixWorld.clone() };
+        this.records.push(record); springs.push(record);
       }
+      for (const edge of physics.collisionEdges ?? []) this.collisionEdges.push({
+        records: edge.springs.map((i) => springs[i]),
+        colliders: edge.colliders.map((i) => this.colliders.find((r) => r.collider === colliders[i])),
+      });
     }
     this.records.sort((a, b) => depth(a.node) - depth(b.node));
     this.updateColliders();
@@ -244,12 +263,14 @@ export class ModelPhysics {
   }
 
   /** Advance the entire animated model at the same time as its collisions. */
-  advance(delta, animate) {
+  advance(delta, animate, afterPhysics = () => {}) {
     if (!Number.isFinite(delta) || delta < 0) throw new Error("physics delta 必须为非负有限数");
     const tick = (dt) => {
       this.beforeAnimation();
       animate(dt);
       this.update(dt);
+      afterPhysics();
+      this.syncPose();
     };
     if (!this.enabled || (!this.records.length && !this.meshCloth?.records.length)) {
       tick(delta + this.frameAccumulator);
@@ -267,6 +288,8 @@ export class ModelPhysics {
       // the second resolves contacts at the new pose after a large jump.
       this.reset(2);
       this.update(0);
+      afterPhysics();
+      this.syncPose();
       return;
     }
     this.frameAccumulator += delta;
@@ -307,6 +330,76 @@ export class ModelPhysics {
       r.node.quaternion.copy(r.base).multiply(r.bone.quaternion);
       r.node.updateWorldMatrix(false, true);
     }
+    this.solveCollisionEdges();
+  }
+
+  /** Preserve a corrected pose in public VRM particle state without rebasing animation. */
+  syncPose() {
+    if (!this.enabled) return;
+    this.root.updateMatrixWorld(true);
+    for (const r of this.records) {
+      if (r.output.equals(r.node.quaternion) && r.outputWorld.equals(r.node.matrixWorld)) continue;
+      this.syncRecord(r);
+      r.output.copy(r.node.quaternion);
+      r.outputWorld.copy(r.node.matrixWorld);
+    }
+  }
+
+  syncRecord(r) {
+    r.node.updateWorldMatrix(true, false);
+    // reset() restores the joint's identity quaternion. Temporarily anchor
+    // that identity at the corrected pose so both particles start there.
+    const final = r.node.quaternion.clone();
+    r.anchor.matrix.copy(r.node.matrixWorld); r.anchor.updateMatrixWorld(true);
+    r.joint.reset();
+    r.node.quaternion.copy(r.base); r.node.updateWorldMatrix(true, false);
+    r.anchor.matrix.copy(r.node.matrixWorld); r.anchor.updateMatrixWorld(true);
+    r.node.quaternion.copy(final); r.node.updateWorldMatrix(false, true);
+    r.bone.quaternion.copy(r.base).invert().multiply(r.node.quaternion);
+    r.bone.updateMatrixWorld(true);
+  }
+
+  solveCollisionEdges() {
+    if (!this.collisionEdges.length) return;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), origin = new THREE.Vector3();
+    const axis = new THREE.Vector3(), tangent = new THREE.Vector3(), desired = new THREE.Vector3();
+    const rotation = new THREE.Quaternion(), parentRotation = new THREE.Quaternion();
+    const changed = new Set();
+    for (let iteration = 0; iteration < 8; iteration++) {
+      let touching = false;
+      for (const edge of this.collisionEdges) for (const collider of edge.colliders) {
+        const [left, right] = edge.records;
+        left.node.localToWorld(a.fromArray(left.definition.tail));
+        right.node.localToWorld(b.fromArray(right.definition.tail));
+        const ra = left.definition.radius * scaleOf(left.node), rb = right.definition.radius * scaleOf(right.node);
+        const contact = this.edgeContact.query(a, b, ra, rb, collider);
+        if (contact.distance >= -1e-6 * Math.max(1e-3, a.distanceTo(b))) continue;
+        touching = true;
+        const weights = [1 - contact.t, contact.t], tangents = [];
+        let denominator = 0;
+        edge.records.forEach((r, i) => {
+          r.node.getWorldPosition(origin);
+          axis.copy(i ? b : a).sub(origin).normalize();
+          tangent.copy(contact.normal).addScaledVector(axis, -contact.normal.dot(axis));
+          tangents.push(tangent.clone());
+          denominator += weights[i] ** 2 * tangent.lengthSq();
+        });
+        if (denominator < 1e-12) continue;
+        edge.records.forEach((r, i) => {
+          r.node.getWorldPosition(origin);
+          axis.copy(i ? b : a).sub(origin);
+          desired.copy(axis).addScaledVector(tangents[i], -contact.distance * weights[i] / denominator);
+          if (!axis.lengthSq() || !desired.lengthSq()) return;
+          rotation.setFromUnitVectors(axis.normalize(), desired.normalize());
+          if (r.node.parent) r.node.parent.getWorldQuaternion(parentRotation); else parentRotation.identity();
+          rotation.premultiply(parentRotation.clone().invert()).multiply(parentRotation);
+          r.node.quaternion.premultiply(rotation).normalize();
+          r.node.updateWorldMatrix(false, true); changed.add(r);
+        });
+      }
+      if (!touching) break;
+    }
+    for (const r of changed) this.syncRecord(r);
   }
 
   update(delta) {
@@ -345,8 +438,12 @@ export class ModelPhysics {
       this.accumulator -= STEP;
     }
     // Also retain the last simulated result on frames below one fixed step.
-    for (const r of this.records) r.node.quaternion.copy(r.base).multiply(r.bone.quaternion);
+    for (const r of this.records) {
+      r.node.quaternion.copy(r.base).multiply(r.bone.quaternion);
+      r.output.copy(r.node.quaternion);
+    }
     this.root.updateMatrixWorld(true);
+    for (const r of this.records) r.outputWorld.copy(r.node.matrixWorld);
     this.meshCloth?.update(delta);
   }
 
@@ -356,5 +453,6 @@ export class ModelPhysics {
     this.meshCloth = null;
     this.records.length = 0;
     this.colliders.length = 0;
+    this.collisionEdges.length = 0;
   }
 }

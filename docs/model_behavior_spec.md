@@ -95,6 +95,7 @@ export default class AttachmentAdjuster {
   FixedUpdate() {}
   Update() {}
   LateUpdate() {}
+  PostPhysics() {}
 
   OnDisable() {}
   OnDestroy() {}
@@ -313,6 +314,8 @@ FixedUpdate（固定时间步，每帧执行零次或多次）
 → 标准表情求值
 → 发布表情与动作查询快照
 → LateUpdate
+→ 模型物理求值
+→ PostPhysics
 → Render
 ```
 
@@ -329,8 +332,12 @@ OnDisable
 再开始任何实例的 `OnEnable`；同理，必须完成所有 `OnEnable` 后再开始任何 `Start`。
 
 `context.time` 在调用逐帧方法前更新。`FixedUpdate` 使用 `fixedDeltaTime`；
-`Update` 与 `LateUpdate` 使用同一帧的 `deltaTime` 和 `elapsedTime`。动作求值必须位于
+`Update`、`LateUpdate` 与 `PostPhysics` 使用同一步的 `deltaTime` 和 `elapsedTime`。动作求值必须位于
 `Update` 与 `LateUpdate` 之间，使行为可以在动画完成后执行跟随或补偿逻辑。
+
+`PostPhysics` 用于在物理结果上执行补偿。未声明或关闭模型物理时仍调用此阶段。
+补偿若修改受物理控制的辅助骨，物理求解器应同步更新对应状态，避免下一步跳回补偿前的结果；
+下次动作求值仍从动画参考姿态开始，不将补偿永久累积进参考姿态。
 
 当前资源格式不提供运行时启用或禁用 Behavior 的模型字段。成功创建的实例在模型
 生命周期内保持启用，因此各调用一次 `OnEnable` 和 `OnDisable`。
