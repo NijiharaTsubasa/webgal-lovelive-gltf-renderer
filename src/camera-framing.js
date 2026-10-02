@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 
-export function frameCharacterCamera(camera, root, framing) {
+export function frameCharacterCamera(camera, root, framing, group) {
   let center;
   let viewHeight;
   if (framing) {
     // Shared world-space framing preserves actor scale regardless of hair or wardrobe bounds.
-    center = new THREE.Vector3(0, framing.centerY, 0);
+    center = new THREE.Vector3(0, framing.centerY + (framing.groupOffsets?.[group] ?? 0), 0);
     viewHeight = framing.viewHeight;
   } else {
     const box = new THREE.Box3().setFromObject(root);

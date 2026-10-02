@@ -106,7 +106,7 @@ export class OffscreenCharacter {
     this.character.configureParameterPlayback({ runtime,
       adapters: new ExpressionAdapterRegistry(parameterEntries, '') });
     // Stable framing: never recalculate bounds as the actor moves.
-    frameCharacterCamera(this.camera, this.character.root, framing);
+    frameCharacterCamera(this.camera, this.character.root, framing, this.character.config.group);
     await this.setMotion('');
     this.character.update(0);
     await this.renderer.compileAsync(this.scene, this.camera);

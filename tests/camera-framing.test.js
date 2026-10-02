@@ -31,3 +31,19 @@ test('unspecified framing still auto-fits standalone actors', () => {
   frameCharacterCamera(tall, actor(2));
   assert.ok(tall.position.z > small.position.z);
 });
+
+test('group composition offsets shift a portrait without changing scale or relative heights', () => {
+  const viewHeight = 1.36 / 1.18;
+  const framing = { viewHeight, centerY: 1.16, groupOffsets: { llas: 100 * viewHeight / 1800 } };
+  const a = new THREE.PerspectiveCamera(35, .75, .01, 100), b = a.clone(), c = a.clone();
+  frameCharacterCamera(a, actor(1.54), framing, 'llas');
+  frameCharacterCamera(b, actor(1.57), framing, 'llas');
+  frameCharacterCamera(c, actor(1.54), framing, 'hasunosora');
+  for (const camera of [a,b,c]) camera.updateMatrixWorld();
+  assert.equal(a.position.z, c.position.z);
+  assert.deepEqual(a.position.toArray(), b.position.toArray());
+  const p = new THREE.Vector3(0,1.54,0);
+  assert.ok(Math.abs((p.clone().project(c).y - p.clone().project(a).y) * 1800 / 2 - 100) < 1e-9);
+  const tall = new THREE.Vector3(0,1.57,0).project(b);
+  assert.ok(Math.abs(tall.y - p.clone().project(a).y - 2 * .03 / viewHeight) < 1e-9);
+});

@@ -5,7 +5,7 @@ export interface OffscreenCharacterOptions {
   width?: number;
   height?: number;
   /** Fixed view height and vertical center in model world units (meters). */
-  framing?: { viewHeight: number; centerY: number };
+  framing?: { viewHeight: number; centerY: number; groupOffsets?: Record<string, number> };
 }
 export class OffscreenCharacter {
   static create(options: OffscreenCharacterOptions): Promise<OffscreenCharacter>;
