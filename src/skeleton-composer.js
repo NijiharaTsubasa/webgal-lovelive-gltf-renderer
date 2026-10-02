@@ -58,12 +58,24 @@ function buildBoneTargets(headBones, bodyBones) {
   return { targets, fallbacks };
 }
 
-function rebindHeadSkins(headRoot, boneTargets) {
-  let skins = 0;
-  let reboundJoints = 0;
+function captureHeadSkins(headRoot) {
+  const result = [];
   headRoot.traverse((object) => {
     if (!object.isSkinnedMesh || !object.skeleton) return;
-    const bones = object.skeleton.bones.map((bone) => {
+    result.push({ object, joints: object.skeleton.bones.map((bone, index) => ({
+      bone,
+      world: bone.matrixWorld.clone(),
+      inverse: object.skeleton.boneInverses[index].clone(),
+    })) });
+  });
+  return result;
+}
+
+function rebindHeadSkins(headSkins, boneTargets) {
+  let skins = 0;
+  let reboundJoints = 0;
+  for (const { object, joints } of headSkins) {
+    const bones = joints.map(({ bone }) => {
       if (!HUMANOID_BONE_NAMES.has(bone.name)) return bone;
       const target = boneTargets.get(bone);
       if (!target) {
@@ -72,12 +84,12 @@ function rebindHeadSkins(headRoot, boneTargets) {
       reboundJoints += 1;
       return target;
     });
-    // Recompute inverse bind matrices against the selected body. Reusing the
-    // head component's inverses would deform it whenever the body bind pose
-    // differs (which is expected for arbitrary compatible combinations).
-    object.bind(new THREE.Skeleton(bones), object.bindMatrix.clone());
+    // Preserve each slot's mesh-to-joint mapping while changing joint frames.
+    const inverses = joints.map(({ world, inverse }, index) =>
+      bones[index].matrixWorld.clone().invert().multiply(world).multiply(inverse));
+    object.bind(new THREE.Skeleton(bones, inverses), object.bindMatrix.clone());
     skins += 1;
-  });
+  }
   return { skins, reboundJoints };
 }
 
@@ -122,6 +134,7 @@ export function composeHumanoidHeadBody(bodyRoot, headRoot) {
   const bodyBones = collectCoreBones(bodyRoot, "body");
   const headBones = collectCoreBones(headRoot, "head");
   const boneMapping = buildBoneTargets(headBones, bodyBones);
+  const headSkins = captureHeadSkins(headRoot);
   const nodeBindings = new Map([...boneMapping.targets].map(([source, node]) => [source, {
     node,
     localMatrix: node.matrixWorld.clone().invert().multiply(source.matrixWorld),
@@ -131,7 +144,7 @@ export function composeHumanoidHeadBody(bodyRoot, headRoot) {
 
   bodyRoot.updateMatrixWorld(true);
   headRoot.updateMatrixWorld(true);
-  const rebound = rebindHeadSkins(headRoot, boneMapping.targets);
+  const rebound = rebindHeadSkins(headSkins, boneMapping.targets);
   for (const child of [...headRoot.children]) bodyRoot.attach(child);
   bodyRoot.updateMatrixWorld(true);
 
