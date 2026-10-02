@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { ParameterArmRenderer, armDrawsInFront, armRegionWeights } from '../src/garupa/arm-renderer.js';
+import { ParameterArmRenderer, armDrawsInFront, armDrawOrder, armRegionWeights } from '../src/garupa/arm-renderer.js';
 import { setParameterizedRenderingEnabled } from '../src/parameterized-renderer.js';
 
 const ATTRIBUTE = 'garupaArmRegions';
@@ -53,7 +53,7 @@ function materialState(material) {
     hasColorMask: Object.hasOwn(material.userData, '__unityColorWriteMask'), colorMask: material.userData.__unityColorWriteMask,
   };
 }
-function mockRenderer(adaptation, failureLayer) {
+function mockRenderer(adaptation, failureLayer, failureSide) {
   const result = {
     autoClear: true, shadowMap: { autoUpdate: true }, frames: [], clears: [], events: [],
     clear(...args) { this.clears.push(args); this.events.push(['clear', ...args]); },
@@ -72,8 +72,8 @@ function mockRenderer(adaptation, failureLayer) {
       }
       visit(scene);
       this.events.push(['render', adaptation.layer.value]);
-      this.frames.push({ layer: adaptation.layer.value, background: scene.background, autoClear: this.autoClear, draws });
-      if (adaptation.layer.value === failureLayer) throw new Error('synthetic draw failure');
+      this.frames.push({ layer: adaptation.layer.value, side: adaptation.side.value, background: scene.background, autoClear: this.autoClear, draws });
+      if (adaptation.layer.value === failureLayer && (failureSide === undefined || adaptation.side.value === failureSide)) throw new Error('synthetic draw failure');
     },
   };
   return result;
@@ -143,6 +143,7 @@ test('material identity, defines, live uniforms and existing compile/key context
   assert.equal(runtime.material, material); assert.equal(program.uniforms.sourceLive, live); assert.equal(calls, 1);
   live.value = .75; assert.equal(program.uniforms.sourceLive.value, .75);
   assert.equal(program.uniforms.uGarupaArmLayer, adaptation.layer); assert.equal(program.uniforms.uGarupaArmFront, adaptation.front);
+  assert.equal(program.uniforms.uGarupaArmSide, adaptation.side);
   assert.match(program.fragmentShader, /original fragment/); assert.match(program.vertexShader, /garupaArmRegions/);
   assert.equal(material.customProgramCacheKey(), 'source:flags:garupa-arm-regions');
   adaptation.dispose(); assert.equal(material.onBeforeCompile, originalCompile); assert.equal(material.customProgramCacheKey, originalKey);
@@ -287,7 +288,7 @@ test('outside color draws once while later depth passes preserve occlusion witho
     }
     for (const frame of renderer.frames.slice(1)) {
       const outsideDraws = frame.draws.filter(draw => objects.includes(draw.object));
-      if (frame.layer === 4 || frame.layer === 5) {
+      if (frame.layer === 4 || frame.layer === 5 || frame.layer === 6) {
         assert.deepEqual(outsideDraws.map(draw => draw.object), [f.outside, outline]);
         assert.deepEqual(outsideDraws[0].state, { ...states[0], colorWrite: false, colorMask: 0, stencilWriteMask: 0 });
         assert.deepEqual(outsideDraws[1].state, { ...states[2], colorWrite: false, hasColorMask: true, colorMask: 0, stencilWriteMask: 0 });
@@ -300,7 +301,7 @@ test('outside color draws once while later depth passes preserve occlusion witho
 });
 
 test('empty front or back layers are skipped without changing first-layer clearing and background', () => {
-  for (const [change, expectedLayers, expectedClears] of [[0, [2, 4, 3], 1], [1, [1, 5, 2], 1]]) {
+  for (const [change, expectedLayers, expectedClears] of [[0, [2, 4, 3, 4, 3], 2], [1, [1, 6, 1, 5, 2], 2]]) {
     const f = sceneFixture(), adaptation = new ParameterArmRenderer(f.root), renderer = mockRenderer(adaptation);
     adaptation.setParameters({ PARAM_ARM_L_CHANGE: change, PARAM_ARM_R_CHANGE: change });
     const background = f.scene.background;
@@ -312,6 +313,36 @@ test('empty front or back layers are skipped without changing first-layer cleari
     for (const frame of renderer.frames.slice(1)) { assert.equal(frame.background, null); assert.equal(frame.autoClear, false); }
     assert.equal(f.scene.background, background); assert.equal(renderer.autoClear, true);
     assert.equal(renderer.shadowMap.autoUpdate, true); adaptation.dispose();
+  }
+});
+
+test('hand order follows measured integer buckets with left last at equal order', () => {
+  for (const [change, order] of [[-1, 700], [0, 700], [.00009, 700], [.00011, 699], [.4, 557], [.4001, 557], [.5, 522], [1, 345], [2, 345]]) {
+    assert.equal(armDrawOrder(change), order, `CHANGE ${change}`);
+  }
+  for (const [left, right, sides] of [[0, 0, [1, 0]], [.4, 0, [0, 1]], [.4001, .4, [1, 0]], [.9, .95, [1, 0]], [.95, .9, [0, 1]]]) {
+    const f = sceneFixture(), adaptation = new ParameterArmRenderer(f.root), renderer = mockRenderer(adaptation);
+    adaptation.setParameters({ PARAM_ARM_L_CHANGE: left, PARAM_ARM_R_CHANGE: right });
+    adaptation.drawScene(renderer, f.scene, f.camera);
+    const arms = renderer.frames.filter(frame => frame.layer === 1 || frame.layer === 3);
+    assert.deepEqual(arms.map(frame => frame.side), sides);
+    assert.equal(adaptation.side.value, -1);
+    adaptation.dispose();
+  }
+});
+
+test('second-arm color and scene-depth failures restore masks, side and material state', () => {
+  for (const [change, layer] of [[0, 3], [1, 6], [1, 1]]) {
+    const f = sceneFixture(), adaptation = new ParameterArmRenderer(f.root), renderer = mockRenderer(adaptation, layer, 0);
+    const states = [f.source, f.noDepth, f.outline, f.outside.material].map(materialState);
+    const background = f.scene.background;
+    adaptation.setParameters({ PARAM_ARM_L_CHANGE: change, PARAM_ARM_R_CHANGE: change });
+    assert.throws(() => adaptation.drawScene(renderer, f.scene, f.camera), /synthetic draw failure/);
+    assert.deepEqual([f.source, f.noDepth, f.outline, f.outside.material].map(materialState), states);
+    assert.equal(adaptation.layer.value, 0); assert.equal(adaptation.side.value, -1);
+    assert.equal(f.baseMesh.layers.mask, 3); assert.equal(f.passMesh.layers.mask, 5); assert.equal(f.outside.layers.mask, 1);
+    assert.equal(f.scene.background, background); assert.equal(renderer.autoClear, true); assert.equal(renderer.shadowMap.autoUpdate, true);
+    adaptation.dispose();
   }
 });
 

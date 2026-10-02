@@ -9,6 +9,15 @@ export function armDrawsInFront(change = 0) {
   return Math.fround(change) < BACK_TRANSITION;
 }
 
+// Hand drawables in this series share the measured 700 -> 345 order range.
+// Preserve the observed integer buckets and neutral plateau: comparing the
+// raw CHANGE values would reverse hands that the source draws at equal order.
+export function armDrawOrder(change = 0) {
+  const value = Math.fround(Math.max(0, Math.min(1, change)));
+  if (value < 0.0001) return 700;
+  return Math.floor(700 - 355 * value);
+}
+
 function regionOf(node) {
   for (let current = node; current; current = current.parent) {
     if (/^Left(LowerArm|Hand)$/.test(current.name)) return 0;
@@ -46,6 +55,8 @@ export class ParameterArmRenderer {
     this.root = root;
     this.layer = { value: 0 };
     this.front = { value: new THREE.Vector2(1, 1) };
+    this.side = { value: -1 };
+    this.order = [1, 0];
     this.materials = new Map();
     this.geometries = [];
     this.meshes = [];
@@ -109,26 +120,32 @@ export class ParameterArmRenderer {
       if (!shader.vertexShader.includes(anchor) || !shader.fragmentShader.includes(anchor)) {
         throw new Error('Parameter arm rendering requires shader main: ' + material.name);
       }
-      Object.assign(shader.uniforms, { uGarupaArmLayer: this.layer, uGarupaArmFront: this.front });
+      Object.assign(shader.uniforms, {
+        uGarupaArmLayer: this.layer, uGarupaArmFront: this.front, uGarupaArmSide: this.side,
+      });
       shader.vertexShader = 'attribute vec4 ' + ATTRIBUTE + ';\nvarying vec4 vGarupaArmRegions;\n'
         + shader.vertexShader.replace(anchor, anchor + '\nvGarupaArmRegions = ' + ATTRIBUTE + ';');
       shader.fragmentShader = [
         'varying vec4 vGarupaArmRegions;',
         'uniform float uGarupaArmLayer;',
         'uniform vec2 uGarupaArmFront;',
+        'uniform float uGarupaArmSide;',
       ].join('\n') + '\n' + shader.fragmentShader.replace(anchor, anchor + [
         '',
         'if (uGarupaArmLayer > 0.5) {',
         '  bool distal = max(vGarupaArmRegions.x, vGarupaArmRegions.y) >= 0.5;',
+        '  float side = vGarupaArmRegions.x >= vGarupaArmRegions.y ? 0.0 : 1.0;',
         '  bool front = (vGarupaArmRegions.x >= vGarupaArmRegions.y ? uGarupaArmFront.x : uGarupaArmFront.y) > 0.5;',
+        '  if ((uGarupaArmLayer < 1.5 || (uGarupaArmLayer > 2.5 && uGarupaArmLayer < 3.5)) && abs(side - uGarupaArmSide) > 0.5) discard;',
         '  if (uGarupaArmLayer < 1.5) { if (!distal || front) discard; }',
         '  else if (uGarupaArmLayer < 2.5) { if (distal) discard; }',
         '  else if (uGarupaArmLayer < 3.5) { if (!distal || !front) discard; }',
         '  else if (uGarupaArmLayer < 4.5) { if (max(vGarupaArmRegions.z, vGarupaArmRegions.w) < 0.5) discard; }',
-        '  else {',
+        '  else if (uGarupaArmLayer < 5.5) {',
         '    float upper = vGarupaArmRegions.x >= vGarupaArmRegions.y ? vGarupaArmRegions.z : vGarupaArmRegions.w;',
         '    if (!distal || front || upper <= 0.0) discard;',
         '  }',
+        '  else { discard; }',
         '}',
       ].join('\n'));
     };
@@ -144,6 +161,10 @@ export class ParameterArmRenderer {
   setParameters(parameters) {
     this.front.value.set(armDrawsInFront(parameters.PARAM_ARM_L_CHANGE) ? 1 : 0,
       armDrawsInFront(parameters.PARAM_ARM_R_CHANGE) ? 1 : 0);
+    const left = armDrawOrder(parameters.PARAM_ARM_L_CHANGE);
+    const right = armDrawOrder(parameters.PARAM_ARM_R_CHANGE);
+    // Equal source orders submit the right hand first, then the left hand.
+    this.order = left < right ? [0, 1] : [1, 0];
   }
 
   drawArmDepth(renderer, scene, camera, layer, outside) {
@@ -208,15 +229,19 @@ export class ParameterArmRenderer {
     });
     try {
       const layers = [];
-      if (!this.front.value.x || !this.front.value.y) layers.push(1);
-      layers.push(2);
-      if (this.front.value.x || this.front.value.y) layers.push(3);
-      for (const [index, layer] of layers.entries()) {
+      for (const side of this.order) if (!this.front.value.getComponent(side)) layers.push([1, side]);
+      layers.push([2, -1]);
+      for (const side of this.order) if (this.front.value.getComponent(side)) layers.push([3, side]);
+      for (const [index, [layer, side]] of layers.entries()) {
         this.layer.value = layer;
+        this.side.value = side;
         // Draw the surrounding scene once. Later depth prepasses retain its
         // occlusion without painting the ground over an already drawn rear arm.
         for (const [object, mask] of outside) object.layers.mask = index === 0 ? mask : 0;
         if (index !== 0) renderer.clear(false, true, false);
+        // Separate hands must not depth-test against each other. Restore only
+        // scene depth before a second rear hand; the body is still painted later.
+        if (layer === 1 && index !== 0) this.drawArmDepth(renderer, scene, camera, 6, outside);
         if (layer === 2 && index !== 0) {
           // Preserve the elbow's local occlusion across the body/rear split.
           // Only the shared upper/lower skinning region contributes depth;
@@ -231,6 +256,7 @@ export class ParameterArmRenderer {
       }
     } finally {
       this.layer.value = 0;
+      this.side.value = -1;
       for (const [object, mask] of outside) object.layers.mask = mask;
       scene.background = background;
       renderer.autoClear = autoClear;
@@ -242,6 +268,7 @@ export class ParameterArmRenderer {
     if (this.disposed) return;
     this.disposed = true;
     this.layer.value = 0;
+    this.side.value = -1;
     for (const { mesh, original, geometry } of this.meshes) {
       if (mesh.geometry === geometry) mesh.geometry = original;
     }

@@ -281,3 +281,158 @@ test('rear elbow surface keeps its depth against adjacent upper-arm outline with
       'body-layer outline must not paint over the nearer rear elbow: ' + JSON.stringify(result));
   } finally { removeAbortListener(); await browser.close(); }
 });
+
+test('crossing forearms in one skinned primitive follow left-over-right ordering instead of intersecting depth', { timeout: 30_000 }, async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const removeAbortListener = closeBrowserOnAbort(t.signal, browser);
+  try {
+    const { page, errors } = await fixturePage(browser);
+    const result = await page.evaluate(async () => {
+      const THREE = await import('/three.module.js');
+      const { ParameterArmRenderer } = await import('/arm-renderer.js');
+      const { createDefaultPassObject } = await import('/shader-passes.js');
+      const { applyRenderState, installUnityColorMaskSupport } = await import('/state.js');
+      const size = 128;
+      const renderer = new THREE.WebGLRenderer({ alpha: true, stencil: true, antialias: false });
+      renderer.setSize(size, size); renderer.setClearColor(0, 0);
+      installUnityColorMaskSupport(renderer);
+      const scene = new THREE.Scene(), root = new THREE.Group(); scene.add(root);
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, .1, 10); camera.position.z = 3;
+      const bone = (name, parent) => {
+        const node = new THREE.Bone(); node.name = name; parent.add(node); return node;
+      };
+      const chest = bone('Chest', root);
+      const leftUpper = bone('LeftUpperArm', chest), leftLower = bone('LeftLowerArm', leftUpper);
+      const rightUpper = bone('RightUpperArm', chest), rightLower = bone('RightLowerArm', rightUpper);
+      const positions = [], normals = [], colors = [], indices = [], weights = [], directions = [];
+      function patch(x0, x1, y0, y1, depth, color, joint) {
+        const corners = [[x0, y0, -1, -1], [x1, y0, 1, -1], [x1, y1, 1, 1], [x0, y1, -1, 1]];
+        for (const index of [0, 1, 2, 0, 2, 3]) {
+          const [x, y, dx, dy] = corners[index];
+          positions.push(x, y, depth(x)); normals.push(0, 0, 1); colors.push(...color);
+          indices.push(joint, 0, 0, 0); weights.push(1, 0, 0, 0); directions.push(dx, dy);
+        }
+      }
+      patch(-.8, .8, -.8, .3, () => -.8, [0, 0, 1], 0);
+      // Both hands belong to the same draw call. Their sloping surfaces cross:
+      // ordinary depth shows green on one side and red on the other. The
+      // source drawable order requires the red left hand across the overlap.
+      patch(-.65, .65, .15, .4, x => -.25 + .6 * x, [1, 0, 0], 2);
+      patch(-.45, .45, -.15, .7, x => -.25 - .6 * x, [0, 1, 0], 4);
+      const geometry = new THREE.BufferGeometry();
+      for (const [name, values, width] of [['position', positions, 3], ['normal', normals, 3], ['color', colors, 3],
+        ['skinWeight', weights, 4], ['fixtureOutlineDirection', directions, 2]]) {
+        geometry.setAttribute(name, new THREE.Float32BufferAttribute(values, width));
+      }
+      geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(indices, 4));
+      const source = new THREE.MeshBasicMaterial({ vertexColors: true });
+      applyRenderState(source, { renderQueue: 2453, zWrite: 1, zTest: 4,
+        stencil: { ref: 201, comp: 8, pass: 2 } });
+      const mesh = new THREE.SkinnedMesh(geometry, source); mesh.frustumCulled = false; mesh.renderOrder = 2453;
+      root.add(mesh); root.updateMatrixWorld(true);
+      mesh.bind(new THREE.Skeleton([chest, leftUpper, leftLower, rightUpper, rightLower]));
+      const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0, depthWrite: false });
+      applyRenderState(outlineMaterial, { zTest: 4, stencil: { ref: 201, comp: 3, pass: 0 } });
+      outlineMaterial.onBeforeCompile = shader => {
+        shader.vertexShader = 'attribute vec2 fixtureOutlineDirection;\n' + shader.vertexShader.replace(
+          '#include <begin_vertex>', '#include <begin_vertex>\ntransformed.xy += fixtureOutlineDirection * 0.05;\ntransformed.z -= 0.01;');
+      };
+      const outline = createDefaultPassObject(mesh, outlineMaterial, 'Outline');
+      outline.userData.__parameterizedPassObject = true; outline.renderOrder = 2454; outline.frustumCulled = false;
+      const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.8), new THREE.MeshBasicMaterial({ color: 0x808080 }));
+      backdrop.position.z = -1.2; backdrop.visible = false; scene.add(backdrop);
+      const foreground = new THREE.Mesh(new THREE.PlaneGeometry(.1, 1.7), new THREE.MeshBasicMaterial({ color: 0xff00ff }));
+      foreground.position.set(.2, 0, .8); foreground.visible = false; scene.add(foreground);
+      const target = new THREE.WebGLRenderTarget(size, size, { stencilBuffer: true });
+      const arms = new ParameterArmRenderer(root), gl = renderer.getContext();
+      const read = () => {
+        const pixels = new Uint8Array(size * size * 4);
+        gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const at = (x, y) => {
+          const offset = (Math.floor((y + 1) * size / 2) * size + Math.floor((x + 1) * size / 2)) * 4;
+          return Array.from(pixels.slice(offset, offset + 4));
+        };
+        return { overlap: [-.3, -.2, -.1, .1, .2, .3].map(x => at(x, .275)),
+          outsideBodyOverlap: [-.3, -.2, -.1, .1, .2, .3].map(x => at(x, .375)),
+          leftOnly: at(.55, .375), rightOnly: at(0, .6), body: at(.7, -.6), outline: at(.67, .275),
+          foregroundHand: at(.2, .375), foregroundBody: at(.2, -.5) };
+      };
+      const state = () => ({ autoClear: renderer.autoClear, shadowAutoUpdate: renderer.shadowMap.autoUpdate,
+        layer: arms.layer.value, side: arms.side.value, front: arms.front.value.toArray(), order: [...arms.order],
+        backgroundNull: scene.background === null,
+        sameGeometry: mesh.geometry === geometry && outline.geometry === geometry,
+        sameMaterials: mesh.material === source && outline.material === outlineMaterial,
+        objects: [mesh, outline, backdrop, foreground].map(object => ({ layers: object.layers.mask,
+          visible: object.visible, materialVisible: object.material.visible,
+          colorWrite: object.material.colorWrite, depthWrite: object.material.depthWrite,
+          stencilWrite: object.material.stencilWrite, stencilWriteMask: object.material.stencilWriteMask,
+          hasMask: Object.hasOwn(object.material.userData, '__unityColorWriteMask') })) });
+      const assignments = [
+        { name: 'both front equal', left: 0, right: 0, top: 'left', front: true },
+        { name: 'both front right higher', left: .4, right: 0, top: 'right', front: true },
+        { name: 'both front same source order bucket', left: .4001, right: .4, top: 'left', front: true },
+        { name: 'both rear equal', left: 1, right: 1, top: 'left', front: false },
+        { name: 'both rear right higher', left: 1, right: .9, top: 'right', front: false },
+        { name: 'left front right rear', left: 0, right: 1, top: 'left', front: true },
+        { name: 'left rear right front', left: 1, right: 0, top: 'right', front: true },
+      ];
+      const frames = [];
+      try {
+        for (const [name, destination] of [['screen', null], ['offscreen', target]]) {
+          renderer.setRenderTarget(destination);
+          backdrop.visible = false; foreground.visible = false;
+          renderer.render(scene, camera); const raw = read();
+          const cases = [];
+          for (const assignment of assignments) {
+            arms.setParameters({ PARAM_ARM_L_CHANGE: assignment.left, PARAM_ARM_R_CHANGE: assignment.right });
+            backdrop.visible = false; foreground.visible = false;
+            const before = state();
+            arms.drawScene(renderer, scene, camera); const layered = read();
+            const after = state();
+            backdrop.visible = true;
+            arms.drawScene(renderer, scene, camera); const withBackdrop = read();
+            foreground.visible = true;
+            const outsideBefore = state();
+            arms.drawScene(renderer, scene, camera); const withForeground = read();
+            const outsideAfter = state();
+            cases.push({ assignment, layered, withBackdrop, withForeground, before, after, outsideBefore, outsideAfter });
+          }
+          frames.push({ name, raw, cases, targetRestored: renderer.getRenderTarget() === destination });
+        }
+        return { frames, glError: gl.getError() };
+      } finally {
+        arms.dispose(); target.dispose(); geometry.dispose(); source.dispose(); outlineMaterial.dispose(); renderer.dispose();
+        for (const object of [backdrop, foreground]) { object.geometry.dispose(); object.material.dispose(); }
+      }
+    });
+    assert.deepEqual(errors, []); assert.equal(result.glError, 0);
+    for (const { name, raw, cases, targetRestored } of result.frames) {
+      assert.deepEqual(raw.overlap[0], [0, 255, 0, 255], `${name}: control must show the nearer right hand`);
+      assert.deepEqual(raw.overlap.at(-1), [255, 0, 0, 255], `${name}: control must reproduce intersecting hand depth`);
+      for (const { assignment, layered, withBackdrop, withForeground, before, after, outsideBefore, outsideAfter } of cases) {
+        const label = `${name}, ${assignment.name}`;
+        const top = assignment.top === 'left' ? [255, 0, 0, 255] : [0, 255, 0, 255];
+        const crossing = assignment.front ? top : [0, 0, 255, 255];
+        assert.deepEqual(layered.overlap, Array.from({ length: 6 }, () => crossing),
+          `${label}: source hand order and body layer must cover the whole crossing`);
+        assert.deepEqual(layered.outsideBodyOverlap, Array.from({ length: 6 }, () => top),
+          `${label}: source hand order must hold outside the body's silhouette`);
+        assert.deepEqual(layered.leftOnly, [255, 0, 0, 255]);
+        assert.deepEqual(layered.rightOnly, [0, 255, 0, 255]);
+        assert.deepEqual(layered.body, [0, 0, 255, 255]);
+        if (assignment.left < .79) {
+          assert.deepEqual(layered.outline, [0, 0, 0, 255], `${label}: stencil outline pass must remain visible`);
+        }
+        assert.deepEqual(withBackdrop.outsideBodyOverlap, layered.outsideBodyOverlap,
+          `${label}: farther scenery must not overpaint either hand`);
+        assert.deepEqual(withForeground.foregroundHand, [255, 0, 255, 255],
+          `${label}: nearer scene depth must occlude the second hand after its depth clear`);
+        assert.deepEqual(withForeground.foregroundBody, [255, 0, 255, 255],
+          `${label}: nearer scene depth must also occlude the body`);
+        assert.deepEqual(after, before, `${label}: hand, pass and renderer state must be restored`);
+        assert.deepEqual(outsideAfter, outsideBefore, `${label}: outside draw state must be restored`);
+      }
+      assert.equal(targetRestored, true);
+    }
+  } finally { removeAbortListener(); await browser.close(); }
+});
