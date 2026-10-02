@@ -12,8 +12,8 @@ export function validateResourceManifest(config, source = "config.json") {
   if (keys.length !== 1 || keys[0] !== "components") {
     fail(source, "顶层只能包含 components");
   }
-  if (!Array.isArray(config.components) || config.components.length === 0) {
-    fail(source, "components 必须是非空数组");
+  if (!Array.isArray(config.components)) {
+    fail(source, "components 必须是数组");
   }
   for (const [index, component] of config.components.entries()) {
     const componentSource = `${source} components[${index}]`;

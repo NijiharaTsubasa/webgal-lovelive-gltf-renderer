@@ -29,6 +29,21 @@ function runtime() {
   };
 }
 
+test('motion configuration applies snake-case fades and defaults independently', () => {
+  const sdk = runtime(), fades = [];
+  sdk.Live2DMotion.loadMotion = () => ({
+    setFadeIn(value) { fades.push(['in', value]); },
+    setFadeOut(value) { fades.push(['out', value]); },
+  });
+  const player = new ParameterPlayer(sdk, { defaults: {}, ranges: {} });
+  player.setMotion('# fps=30\n', { fade_in: 150, fade_out: 250 });
+  player.setMotion('# fps=30\n', { fade_in: 0, fade_out: -1 });
+  player.setMotion('# fps=30\n');
+  assert.deepEqual(fades, [
+    ['in', 150], ['out', 250], ['in', 500], ['out', 500], ['in', 500], ['out', 500],
+  ]);
+});
+
 test('host queue orchestration preserves baseline, transient controls and scoped clocks', () => {
   const sdk = runtime(), getter = sdk.UtSystem.getUserTimeMSec;
   const player = new ParameterPlayer(sdk, { defaults: {}, ranges: {} });

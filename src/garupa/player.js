@@ -73,8 +73,8 @@ export class ParameterPlayer {
       const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n|\r|\n/g, '\r\n');
       const bytes = new TextEncoder().encode(normalized.endsWith('\r\n') ? normalized : `${normalized}\r\n`);
       motion = this.runtime.Live2DMotion.loadMotion(new DataView(bytes.buffer));
-      motion.setFadeIn(definition.fadeIn > 0 ? definition.fadeIn : 500);
-      motion.setFadeOut(definition.fadeOut > 0 ? definition.fadeOut : 500);
+      motion.setFadeIn(definition.fade_in > 0 ? definition.fade_in : 500);
+      motion.setFadeOut(definition.fade_out > 0 ? definition.fade_out : 500);
     }
     this.motionQueue.stopAllMotions();
     this.motion = motion;

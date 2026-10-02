@@ -5,12 +5,16 @@ import { ParameterStore, sharedParameters } from '../src/garupa/player.js';
 
 test('parameter packages mix resource kinds without binding source files to target models', () => {
   const components = [
-    { type: 'garupa-motion', name: 'anon/sample', src: 'sample.mtn', fadeIn: 0 },
+    { type: 'garupa-motion', name: 'anon/sample', src: 'sample.mtn', fade_in: 0 },
     { type: 'garupa-expression', name: 'anon/sample', src: 'face/sample.exp.json' },
     { type: 'shader', name: 'example' },
   ];
   const entries = expandParameterManifest({ components }, 'source/config.json');
   assert.equal(entries.length, 2);
+  assert.deepEqual(expandParameterManifest({ components: [] }, 'config.json'), []);
+  for (const field of ['fade_in', 'fade_out']) {
+    assert.throws(() => expandParameterManifest({ components: [{ ...components[0], [field]: 'bad' }] }, 'config.json'), /有限数值/);
+  }
   assert.equal(parameterResourceUrl(entries[1], '/packages/'), '/packages/source/face/sample.exp.json');
   assert.throws(() => expandParameterManifest({ components: [components[0], components[0]] }, 'config.json'), /重复/);
   for (const src of ['../sample.mtn', '/sample.mtn', 'https://example.com/sample.mtn', 'C:\\sample.mtn']) {

@@ -19,7 +19,7 @@ export function expandParameterManifest(config, configPath) {
     if (typeof file !== 'string' || !file.trim() || /^(?:[a-z][a-z\d+.-]*:|[/\\])/i.test(file)
       || file.replaceAll('\\', '/').split('/').includes('..')) fail('必须使用包内相对路径');
     if (!adapter && !(component.type === 'garupa-motion' ? file.endsWith('.mtn') : file.endsWith('.exp.json'))) fail('源文件扩展名不符合资源类型');
-    for (const key of ['fadeIn', 'fadeOut']) {
+    for (const key of ['fade_in', 'fade_out']) {
       if (component[key] !== undefined && !Number.isFinite(component[key])) fail(`${key} 必须为有限数值`);
     }
     return [{ key: `${configPath}#${index}`, name: component.name, description: component.description,

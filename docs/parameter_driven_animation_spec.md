@@ -18,7 +18,7 @@
 
 | `type` | 用途 | 必需字段 | 可选字段 |
 |---|---|---|---|
-| `garupa-motion` | 原始参数动作 | `name`、`src` | `description`、`fadeIn`、`fadeOut` |
+| `garupa-motion` | 原始参数动作 | `name`、`src` | `description`、`fade_in`、`fade_out` |
 | `garupa-expression` | 原始参数表情 | `name`、`src` | `description` |
 | `garupa-expression-adapter` | 目标模型的面部适配器 | `name`、`motionGroup`、`script` | `description` |
 
@@ -29,7 +29,7 @@
 | `name` | 非空资源名；不是需要解析的动作或情绪编码 |
 | `description` | 人类可读说明，可省略或为空字符串 |
 | `src` | 包内原始文件路径；动作使用 `.mtn`，表情使用 `.exp.json` |
-| `fadeIn`、`fadeOut` | 动作的淡入、淡出时间，单位毫秒；正值生效，省略或非正值采用来源普通动作的默认值 `500` |
+| `fade_in`、`fade_out` | 动作的淡入、淡出时间，单位毫秒；正值生效，省略或非正值采用默认值 `500` |
 | `motionGroup` | 此适配器处理的目标模型兼容域，非空字符串 |
 | `script` | 包内 JavaScript 模块路径，接口见 §5 |
 
@@ -38,7 +38,7 @@
 同一有效资源集合中一个域只能有一个适配器，不能按扫描顺序选择或覆盖。
 
 源动作、源表情不声明目标 `motionGroup`，同一份原文件可以用于不同三维模型。
-动作的淡入淡出原先可以由来源模型清单提供，因此在独立分发时由动作组件携带；
+动作的淡入淡出由动作组件携带；
 表情的淡入淡出已在 `.exp.json` 内，不在清单重复保存。
 
 ### 1.2 示例
@@ -50,15 +50,15 @@
       "type": "garupa-motion",
       "name": "anon/angry01",
       "description": "生气动作",
-      "src": "motions/angry01.mtn",
-      "fadeIn": 500,
-      "fadeOut": 500
+      "src": "anon/angry01.mtn",
+      "fade_in": 500,
+      "fade_out": 500
     },
     {
       "type": "garupa-expression",
       "name": "anon/smile01",
       "description": "微笑表情",
-      "src": "expressions/smile01.exp.json"
+      "src": "anon/smile01.exp.json"
     },
     {
       "type": "garupa-expression-adapter",
@@ -73,6 +73,19 @@
 
 文件可以平铺，也可以放在子目录。适配器可以随模型的 Shader、Behavior 一起
 交付；源动作和表情无需与适配器放在同一个包内。
+
+### 1.3 参数资源目录发现
+
+目录的 `config.json` 包含 `garupa-motion` 或 `garupa-expression`，或其
+`components` 为空时，可以自动发现该目录及子目录中的 `.mtn` 和 `.exp.json`。
+资源名为相对于该配置目录的文件路径，使用 `/` 分隔，并去掉对应扩展名。
+例如 `anon/angry01.mtn` 与 `anon/angry01.exp.json` 分别声明同名的动作和表情。
+子目录有自己的资源配置时，由该配置管理其目录内的资源。
+
+发现程序根据现有文件更新配置中的参数资源条目：新增文件加入，删除文件移除，
+已有文件保留其说明和动作淡入淡出设置；其他类型的组件保持原有声明。
+新增动作采用 `fade_in: 500`、`fade_out: 500`，表情淡入淡出读取 `.exp.json`。
+目录无组件时保留空 `components`，以便继续发现后来添加的文件。
 
 ## 2. 来源参数
 

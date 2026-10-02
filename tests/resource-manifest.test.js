@@ -8,14 +8,14 @@ import {
   validateMotionPayload,
 } from "../src/motion-manifest.js";
 
-test("unified manifests contain only a non-empty components array", () => {
+test("unified manifests contain only a components array, including empty directories", () => {
   const manifest = { components: [{ type: "future-resource" }] };
   assert.equal(validateResourceManifest(manifest), manifest);
   assert.throws(
     () => validateResourceManifest({ type: "model", components: [{ type: "model" }] }),
     /顶层只能包含 components/,
   );
-  assert.throws(() => validateResourceManifest({ components: [] }), /非空数组/);
+  assert.deepEqual(validateResourceManifest({ components: [] }), { components: [] });
 });
 
 test("motion descriptors expand independently from payload data", () => {
