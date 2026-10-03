@@ -19,10 +19,29 @@ export function interpolateCurve(samples,value) {
   return Array.isArray(a)?a.map((v,k)=>v+(b[k]-v)*t):a+(b-a)*t;
 }
 
-function headAngles(table,x,y) {
-  const alongX=table.axis.map(a=>[a,interpolateCurve(table.samples.filter(s=>s.input[0]===a)
-    .map(s=>[s.input[1],s.angles]),y)]);
-  return interpolateCurve(alongX,x);
+function lastInput(evaluate) {
+  let ready=false,previous,result;
+  return value=>{
+    if(!ready||!Object.is(value,previous)) {
+      result=evaluate(value);
+      previous=value;
+      ready=true;
+    }
+    return result;
+  };
+}
+
+function createHeadAngles(table) {
+  const rows=table.axis.map(a=>[a,table.samples.filter(s=>s.input[0]===a).map(s=>[s.input[1],s.angles])]);
+  const alongY=lastInput(y=>rows.map(([a,samples])=>[a,interpolateCurve(samples,y)]));
+  let ready=false,previousX,previousY,result;
+  return (x,y)=>{
+    if(!ready||!Object.is(x,previousX)||!Object.is(y,previousY)) {
+      result=interpolateCurve(alongY(y),x);
+      previousX=x;previousY=y;ready=true;
+    }
+    return result;
+  };
 }
 
 export function createFixedBodyEvaluator(calibration) {
@@ -47,17 +66,35 @@ export function createFixedBodyEvaluator(calibration) {
       hand:lower.clone().invert().multiply(quat(pose.worldRotations[side+'Hand'])).toArray()}];
   }))]));
   const handReferences={Left:null,Right:null};
+  // Calibration is fixed for this evaluator. Each scalar input keeps only its
+  // last exact result; these arrays remain internal and are never accumulated into.
+  const bodyCurves=calibration.bodyCurves.map(curve=>({id:curve.id,
+    evaluate:lastInput(value=>interpolateCurve(curve.samples,value))}));
+  const bodyYawCurve=lastInput(value=>interpolateCurve(calibration.bodyYaw,value));
+  const headAngles=createHeadAngles(calibration.head);
+  const arms=Object.fromEntries(['Left','Right'].map(side=>{
+    const arm=calibration.arms[side];
+    const curves=Object.entries(arm.curves).map(([part,curve])=>({part,id:curve.id,
+      evaluate:lastInput(value=>interpolateCurve(curve.samples,value))}));
+    const lower=lastInput(value=>{
+      const measured=interpolateCurve(arm.curves.lower.segments,value);
+      const baseAngle=Math.atan2(arm.directions.lower[1],arm.directions.lower[0]);
+      return {segmentTurn:Math.atan2(-measured[1],measured[0])-baseAngle,
+        lowerDepth:Math.sqrt(Math.max(.04,1-Math.min(1,measured[2])**2))};
+    });
+    return [side,{curves,lower}];
+  }));
   return input => {
     const p={...calibration.defaults,...input};
     const response={};
-    for(const curve of calibration.bodyCurves)response[curve.id]=interpolateCurve(curve.samples,p[curve.id]);
+    for(const curve of bodyCurves)response[curve.id]=curve.evaluate(p[curve.id]);
     const total=Array(8).fill(0);
     for(const r of Object.values(response))r.forEach((v,i)=>{total[i]+=v;});
     const globalRoll=-(response.PARAM_ROTATION_Z?.[4]??0);
     const bodyRoll=-total[4],headRoll=-total[5];
-    const bodyYaw=interpolateCurve(calibration.bodyYaw,p.PARAM_BODY_ANGLE_X);
+    const bodyYaw=bodyYawCurve(p.PARAM_BODY_ANGLE_X);
     const torso=zTurn(bodyRoll).multiply(turn([0,1,0],bodyYaw)),global=zTurn(globalRoll);
-    const [yaw,pitch]=headAngles(calibration.head,p.PARAM_ANGLE_X,p.PARAM_ANGLE_Y);
+    const [yaw,pitch]=headAngles(p.PARAM_ANGLE_X,p.PARAM_ANGLE_Y);
     const head=zTurn(headRoll).multiply(turn([0,1,0],yaw)).multiply(turn([1,0,0],pitch));
     const world={};
     for(const bone of initialWorldBones) {
@@ -101,7 +138,7 @@ export function createFixedBodyEvaluator(calibration) {
       // Frame-local quaternions and output arrays never expose cached storage.
       const referenceUpper=hand.referenceUpper.clone(),referenceLower=hand.referenceLower.clone();
       const handReference=hand.handReference.clone();
-      const delta=Object.fromEntries(Object.entries(arm.curves).map(([part,c])=>[part,interpolateCurve(c.samples,p[c.id])]));
+      const delta=Object.fromEntries(arms[side].curves.map(c=>[c.part,c.evaluate(p[c.id])]));
       const bodyArm=total[side==='Right'?6:7];
       const angleUpper=-(delta.upper+bodyArm);
       const change=p[`PARAM_ARM_${code}_CHANGE`];
@@ -114,11 +151,8 @@ export function createFixedBodyEvaluator(calibration) {
         const [x,y]=arm.directions[part],planar=new Vector3(x,y,0).normalize().applyQuaternion(zTurn(angle));
         return planar.multiplyScalar(Math.sqrt(1-depth*depth)).add(new Vector3(0,0,depth)).toArray();
       };
-      const measured=interpolateCurve(arm.curves.lower.segments,p[arm.curves.lower.id]);
-      const baseAngle=Math.atan2(arm.directions.lower[1],arm.directions.lower[0]);
-      const segmentTurn=Math.atan2(-measured[1],measured[0])-baseAngle;
+      const {segmentTurn,lowerDepth}=arms[side].lower(p[arm.curves.lower.id]);
       const actualLowerAngle=-(delta.upper+bodyArm)+segmentTurn*180/Math.PI;
-      const lowerDepth=Math.sqrt(Math.max(.04,1-Math.min(1,measured[2])**2));
       // Transport each approved template's arm twist along the authored
       // planar angle. An elbow-plane cross product is singular at straight
       // arms and would invent a 180-degree roll when the source crosses it.
