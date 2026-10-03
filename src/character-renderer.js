@@ -451,23 +451,26 @@ export class CharacterRenderer {
     return this.motion?.command("stop") ?? false;
   }
 
+  evaluatePose(step) {
+    this.elapsedTime += step;
+    this.externalExpressionDriver?.beginFrame();
+    for (const { controller } of this.expressionControllers) controller.beginFrame();
+    this.behaviors?.beforeMotion(step, this.elapsedTime);
+    const motionChange = this.applyPendingMotion();
+    this.parameterPlayer?.update(step);
+    this.motion?.update(step);
+    this.syncFaceActivity();
+    if (this.parameterBody) this.parameterBody.applyParameters(this.parameterPlayer.parameters);
+    else if (!this.motion) this.idlePose?.apply();
+    for (const { controller } of this.expressionControllers) controller.update(step);
+    this.behaviors?.afterMotion();
+    this.externalExpressionDriver?.update(step);
+    return motionChange;
+  }
+
   update(delta) {
     let motionChange = null;
-    const animate = (step) => {
-      this.elapsedTime += step;
-      this.externalExpressionDriver?.beginFrame();
-      for (const { controller } of this.expressionControllers) controller.beginFrame();
-      this.behaviors?.beforeMotion(step, this.elapsedTime);
-      motionChange = this.applyPendingMotion() ?? motionChange;
-      this.parameterPlayer?.update(step);
-      this.motion?.update(step);
-      this.syncFaceActivity();
-      if (this.parameterBody) this.parameterBody.applyParameters(this.parameterPlayer.parameters);
-      else if (!this.motion) this.idlePose?.apply();
-      for (const { controller } of this.expressionControllers) controller.update(step);
-      this.behaviors?.afterMotion();
-      this.externalExpressionDriver?.update(step);
-    };
+    const animate = step => { motionChange = this.evaluatePose(step) ?? motionChange; };
     if (this.physics) this.physics.advance(delta, animate, () => this.behaviors?.afterPhysics());
     else {
       animate(delta);
@@ -476,12 +479,29 @@ export class CharacterRenderer {
     return motionChange;
   }
 
-  render() {
+  prepareFrame() {
+    // Evaluate exactly one zero-time tick without consuming the fixed-step
+    // accumulator. update(0) retains the solver's normal initial settling.
+    this.physics?.beforeAnimation();
+    const change = this.evaluatePose(0);
+    this.physics?.update(0);
+    this.behaviors?.afterPhysics();
+    this.physics?.syncPose();
+    this.ensureRenderResources();
+    return change;
+  }
+
+  ensureRenderResources() {
     let arms = null;
     if (this.parameterBody) {
       arms = this.parameterArmRenderer ??= new ParameterArmRenderer(this.root);
       arms.setParameters(this.parameterPlayer.parameters);
     }
+    return arms;
+  }
+
+  render() {
+    const arms = this.ensureRenderResources();
     this.shaderScope?.tick(this.scene, this.camera);
     if (arms) arms.drawScene(this.renderer, this.scene, this.camera);
     else this.renderer.render(this.scene, this.camera);

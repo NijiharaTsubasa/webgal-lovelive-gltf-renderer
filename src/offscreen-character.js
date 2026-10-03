@@ -4,15 +4,25 @@ import { HostResourceCatalog } from './host-resource-catalog.js';
 import { expandParameterManifest, ExpressionAdapterRegistry } from './garupa/manifest.js';
 import { HostBlink } from './host-blink.js';
 import { frameCharacterCamera } from './camera-framing.js';
+import { CharacterWarmPool } from './character-warm-pool.js';
 
 const catalogs = new Map();
-const warmed = new Map();
+const warmed = new CharacterWarmPool({
+  create: options => OffscreenCharacter.create(options),
+  key: options => OffscreenCharacter.warmKey(options),
+});
 async function catalogFor(url) {
   if (!catalogs.has(url)) {
-    const pending = new HostResourceCatalog(url).load().catch(error => { catalogs.delete(url); throw error; });
+    const pending = new HostResourceCatalog(url).load().catch(error => {
+      if (catalogs.get(url) === pending) catalogs.delete(url);
+      throw error;
+    });
     catalogs.set(url, pending);
+    while (catalogs.size > 4) catalogs.delete(catalogs.keys().next().value);
   }
-  return catalogs.get(url);
+  const pending = catalogs.get(url);
+  catalogs.delete(url); catalogs.set(url, pending);
+  return pending;
 }
 
 // No DOM mounting, ticker, Pixi objects or script syntax is owned here.
@@ -29,37 +39,16 @@ export class OffscreenCharacter {
     }));
   }
 
-  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing }) {
-    return JSON.stringify([new URL(modelUrl, globalThis.location?.href).href, indexUrl, width, height, framing]);
+  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing, motion = '', expression = '' }) {
+    return JSON.stringify([new URL(modelUrl, globalThis.location?.href).href,
+      new URL(indexUrl, globalThis.location?.href).href, width, height, framing, motion, expression]);
   }
 
-  static async preload(options) {
-    const key = this.warmKey(options);
-    if (!warmed.has(key)) {
-      const pending = this.create(options).catch(error => { warmed.delete(key); throw error; });
-      const slot = { pending, timer: null };
-      warmed.set(key, slot);
-      slot.timer = setTimeout(() => {
-        if (warmed.get(key) === slot) { warmed.delete(key); pending.then(actor => actor.dispose(), () => {}); }
-      }, 60000);
-      // Bound only speculative GPU residency, never the number of stage actors.
-      if (warmed.size > 4) {
-        const oldestKey = warmed.keys().next().value;
-        const oldest = warmed.get(oldestKey);
-        clearTimeout(oldest.timer); warmed.delete(oldestKey);
-        oldest.pending.then(actor => actor.dispose(), () => {});
-      }
-    }
-    await warmed.get(key)?.pending;
-  }
+  static preload(options) { return warmed.preload(options); }
 
-  static async takePreloaded(options) {
-    const key = this.warmKey(options);
-    const slot = warmed.get(key);
-    if (!slot) return null;
-    warmed.delete(key); clearTimeout(slot.timer);
-    return slot.pending;
-  }
+  static setPreloadRequests(options) { return warmed.setRequests(options); }
+
+  static takePreloaded(options) { return warmed.take(options); }
 
   static async create(options) {
     const character = new OffscreenCharacter(options);
@@ -88,7 +77,7 @@ export class OffscreenCharacter {
     this.motionGeneration = 0;
   }
 
-  async load({ modelUrl, indexUrl, runtime, framing }) {
+  async load({ modelUrl, indexUrl, runtime, framing, motion = '', expression = '' }) {
     this.catalog = await catalogFor(indexUrl);
     const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior'].includes(item.type)).map(item => item.config));
     for (const config of dependencyConfigs) {
@@ -107,10 +96,23 @@ export class OffscreenCharacter {
       adapters: new ExpressionAdapterRegistry(parameterEntries, '') });
     // Stable framing: never recalculate bounds as the actor moves.
     frameCharacterCamera(this.camera, this.character.root, framing, this.character.config.group);
-    await this.setMotion('');
-    this.character.update(0);
+    await this.setMotion(motion);
+    await this.setExpression(expression);
+    await this.prepare();
+  }
+
+  // The host freezes this actor's ticker while preparing or attaching it.
+  // Actual drawing realizes render targets, texture uploads and runtime passes.
+  async prepare() {
+    if (this.disposed) return;
+    if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
+    this.applyHostInputs();
+    this.character.prepareFrame();
     await this.renderer.compileAsync(this.scene, this.camera);
+    if (this.disposed) return;
+    if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
     this.character.render();
+    if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
   }
 
   async setMotion(name) {
@@ -156,16 +158,21 @@ export class OffscreenCharacter {
 
   setMouth(value) { this.mouth = value === null ? null : Math.max(0, Math.min(1, value)); }
 
-  update(delta) {
-    if (this.disposed) return;
-    const elapsed = Math.max(0, Math.min(delta, 0.1));
-    const closed = this.blink.update(elapsed * 1000);
+  applyHostInputs() {
+    const closed = 1 - this.blink.eyeParamValue;
     this.character.setBlink(closed);
     this.character.setSpeech(this.mouth ?? 0);
     if (this.character.parameterPlayer) {
       this.character.setParameterBlink(closed);
       this.character.setParameterSpeech(this.mouth);
     }
+  }
+
+  update(delta) {
+    if (this.disposed) return;
+    const elapsed = Math.max(0, Math.min(delta, 0.1));
+    this.blink.update(elapsed * 1000);
+    this.applyHostInputs();
     this.character.update(elapsed);
     this.character.render();
   }
@@ -173,8 +180,10 @@ export class OffscreenCharacter {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    this.character.dispose();
-    this.renderer.dispose();
-    this.renderer.forceContextLoss();
+    try { this.character.dispose(); }
+    finally {
+      try { this.renderer.dispose(); }
+      finally { this.renderer.forceContextLoss(); }
+    }
   }
 }
