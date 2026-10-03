@@ -1,8 +1,11 @@
+// Test-only numerical oracle: body-mapping.mjs at dbe9a538e77205d8c8c93e7c0741bc34eb1c7c46.
+// Original SHA-256: b0efeaa5d14074469213c20c8d099c11749667d63966b4db2890abd313301854.
+// Only the two relative dependency imports were relocated for this fixture.
 // Shared authoring rules. Source curves are measured offline; depth is an
 // explicit shared 3D convention. No model, motion identity, fitting, or Unity.
 import {Quaternion, Vector3} from 'three';
-import {blendRotations, orientSegment, standardToWorld, worldToStandard} from './body-joint-space.mjs';
-import {distributeArmTwist} from './body-arm-twist.mjs';
+import {blendRotations, orientSegment, standardToWorld, worldToStandard} from '../../src/garupa/body-joint-space.mjs';
+import {distributeArmTwist} from '../../src/garupa/body-arm-twist.mjs';
 
 const radians = d => d*Math.PI/180;
 const quat = a => new Quaternion().fromArray(a).normalize();
@@ -31,22 +34,11 @@ export function createFixedBodyEvaluator(calibration) {
   const neutralFK=standardToWorld(bones,neutral.rotations,neutral.hipsTranslation,seed.humanScale);
   const center = pose => vec(pose.LeftUpperArm.position).add(vec(pose.RightUpperArm.position)).multiplyScalar(.5);
   const shoulderWidth=vec(neutralFK.LeftUpperArm.position).distanceTo(vec(neutralFK.RightUpperArm.position));
-  // The per-frame translation only reads the upper-arm centers. The full
-  // neutral FK above validates every bone before this ancestor subset is built.
-  const centerBoneNames=new Set();
-  for(const endpoint of ['LeftUpperArm','RightUpperArm']) {
-    for(let name=endpoint;name&&!centerBoneNames.has(name);name=metadata[name].parent)centerBoneNames.add(name);
-  }
-  const centerBones=bones.filter(bone=>centerBoneNames.has(bone.name));
-  const initialWorldBones=bones.filter(bone=>!/^(Left|Right)(UpperArm|LowerArm|Hand)$/.test(bone.name));
-  const fingerBones=Object.fromEntries(['Left','Right'].map(side=>[side,
-    bones.filter(bone=>bone.name.startsWith(side)&&/(Thumb|Index|Middle|Ring|Little)/.test(bone.name))]));
   const armReferences=Object.fromEntries(['Left','Right'].map(side=>[side,Object.fromEntries(Object.entries(seed.hands).map(([id,pose])=>{
     const upper=quat(pose.worldRotations[side+'UpperArm']),lower=quat(pose.worldRotations[side+'LowerArm']);
     return [id,{upper:upper.toArray(),lower:upper.clone().invert().multiply(lower).toArray(),
       hand:lower.clone().invert().multiply(quat(pose.worldRotations[side+'Hand'])).toArray()}];
   }))]));
-  const handReferences={Left:null,Right:null};
   return input => {
     const p={...calibration.defaults,...input};
     const response={};
@@ -60,7 +52,7 @@ export function createFixedBodyEvaluator(calibration) {
     const [yaw,pitch]=headAngles(calibration.head,p.PARAM_ANGLE_X,p.PARAM_ANGLE_Y);
     const head=zTurn(headRoll).multiply(turn([0,1,0],yaw)).multiply(turn([1,0,0],pitch));
     const world={};
-    for(const bone of initialWorldBones) {
+    for(const bone of bones) {
       const upper=['Spine','Chest','UpperChest','Neck','Head'].includes(bone.name)||/^(Left|Right)(Shoulder|UpperArm|LowerArm|Hand|Thumb|Index|Middle|Ring|Little)/.test(bone.name);
       const movement=bone.name==='Head'?head:upper?torso:global;
       world[bone.name]=movement.clone().multiply(quat(neutral.worldRotations[bone.name])).toArray();
@@ -79,28 +71,18 @@ export function createFixedBodyEvaluator(calibration) {
         if(neutralHand)neutralHand.weight+=1-totalHandWeight;
         else active.unshift({id:'01',weight:1-totalHandWeight});
       }
-      let hand=handReferences[side];
-      const reused=hand!==null&&active.length===hand.active.length&&active.every((entry,index)=>
-        entry.id===hand.active[index].id&&Object.is(entry.weight,hand.active[index].weight));
-      if(!reused) {
-        // Mix the approved arm chain in parent-relative space. Independently
-        // mixing world hand/forearm rotations can choose opposite shortest arcs.
-        const referenceUpper=quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].upper}))));
-        const referenceLower=referenceUpper.clone().multiply(quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].lower})))));
-        const handReference=referenceLower.clone().multiply(quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].hand})))));
-        const referenceChain={
-          [metadata[side+'UpperArm'].parent]:neutral.worldRotations[metadata[side+'UpperArm'].parent],
-          [side+'UpperArm']:referenceUpper.toArray(),[side+'LowerArm']:referenceLower.toArray(),[side+'Hand']:handReference.toArray(),
-        };
-        distributeArmTwist(metadata,referenceChain,side);
-        referenceUpper.fromArray(referenceChain[side+'UpperArm']);
-        referenceLower.fromArray(referenceChain[side+'LowerArm']);
-        hand={active,referenceUpper,referenceLower,handReference,fingers:{}};
-      }
-      // Each evaluator retains only its last ordered weights for each side.
-      // Frame-local quaternions and output arrays never expose cached storage.
-      const referenceUpper=hand.referenceUpper.clone(),referenceLower=hand.referenceLower.clone();
-      const handReference=hand.handReference.clone();
+      // Mix the approved arm chain in parent-relative space. Independently
+      // mixing world hand/forearm rotations can choose opposite shortest arcs.
+      const referenceUpper=quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].upper}))));
+      const referenceLower=referenceUpper.clone().multiply(quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].lower})))));
+      const handReference=referenceLower.clone().multiply(quat(blendRotations(active.map(({id,weight})=>({weight,rotation:armReferences[side][id].hand})))));
+      const referenceChain={
+        [metadata[side+'UpperArm'].parent]:neutral.worldRotations[metadata[side+'UpperArm'].parent],
+        [side+'UpperArm']:referenceUpper.toArray(),[side+'LowerArm']:referenceLower.toArray(),[side+'Hand']:handReference.toArray(),
+      };
+      distributeArmTwist(metadata,referenceChain,side);
+      referenceUpper.fromArray(referenceChain[side+'UpperArm']);
+      referenceLower.fromArray(referenceChain[side+'LowerArm']);
       const delta=Object.fromEntries(Object.entries(arm.curves).map(([part,c])=>[part,interpolateCurve(c.samples,p[c.id])]));
       const bodyArm=total[side==='Right'?6:7];
       const angleUpper=-(delta.upper+bodyArm);
@@ -136,15 +118,11 @@ export function createFixedBodyEvaluator(calibration) {
       }
       const handRoll=-(delta.upper+delta.lower+delta.wrist+bodyArm);
       world[side+'Hand']=zTurn(handRoll).multiply(handReference).toArray();
-      for(const bone of fingerBones[side]) {
-        if(!reused)hand.fingers[bone.name]=blendRotations(active.map(e=>({weight:e.weight,rotation:seed.hands[e.id].rotations[bone.name]})));
-        // worldToStandard copies overrides into independently mutable output.
-        fingerRotations[bone.name]=hand.fingers[bone.name];
-      }
-      handReferences[side]=hand;
+      for(const bone of bones.filter(b=>b.name.startsWith(side)&&/(Thumb|Index|Middle|Ring|Little)/.test(b.name)))
+        fingerRotations[bone.name]=blendRotations(active.map(e=>({weight:e.weight,rotation:seed.hands[e.id].rotations[bone.name]})));
     }
-    const rotations=worldToStandard(bones,world,fingerRotations);
-    const fk=standardToWorld(centerBones,rotations,neutral.hipsTranslation,seed.humanScale);
+    const rotations={...worldToStandard(bones,world),...fingerRotations};
+    const fk=standardToWorld(bones,rotations,neutral.hipsTranslation,seed.humanScale);
     // One common translation moves both shoulders and head. It never adds
     // independent clavicle shrug or per-bone translations.
     const rootResponse=response.PARAM_ROTATION_Z;

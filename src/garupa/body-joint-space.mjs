@@ -5,10 +5,12 @@ const q = value => new Quaternion().fromArray(value).normalize();
 const v = value => new Vector3().fromArray(value);
 
 /** World rotations on the reference rig -> the existing anatomical joint basis. */
-export function worldToStandard(bones, worldRotations) {
+export function worldToStandard(bones, worldRotations, overrides) {
   const deformations = Object.fromEntries(bones.map(b =>
     [b.name, q(worldRotations[b.name]).multiply(q(b.rotation).invert())]));
   return Object.fromEntries(bones.map(b => {
+    // Children still consume the original world deformation of overridden bones.
+    if (overrides && Object.hasOwn(overrides, b.name)) return [b.name, overrides[b.name].slice()];
     const frame = q(b.jointFrame);
     const parent = b.parent ? deformations[b.parent] : new Quaternion();
     return [b.name, frame.clone().invert().multiply(parent.clone().invert())

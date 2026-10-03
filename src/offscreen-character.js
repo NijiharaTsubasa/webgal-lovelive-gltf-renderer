@@ -170,8 +170,9 @@ export class OffscreenCharacter {
 
   update(delta) {
     if (this.disposed) return;
-    const elapsed = Math.max(0, Math.min(delta, 0.1));
-    this.blink.update(elapsed * 1000);
+    if (!Number.isFinite(delta)) throw new Error('Character delta must be finite');
+    const elapsed = Math.max(0, delta);
+    this.blink.update(Math.min(elapsed, 0.1) * 1000);
     this.applyHostInputs();
     this.character.update(elapsed);
     this.character.render();

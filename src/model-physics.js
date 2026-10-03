@@ -16,6 +16,10 @@ const STEP = 1 / 60;
 const vector = (value) => new THREE.Vector3(...value);
 const depth = (node) => node.parent ? 1 + depth(node.parent) : 0;
 const scaleOf = (node) => maximumStretch(node.matrixWorld);
+const withinRoot = (root, node) => {
+  for (let current = node; current; current = current.parent) if (current === root) return true;
+  return false;
+};
 
 export function validatePhysics(value, source = "physics") {
   const fail = (message) => { throw new Error(`${source}: ${message}`); };
@@ -299,9 +303,9 @@ export class ModelPhysics {
     for (let i = 0; i < count; i += 1) tick(STEP);
   }
 
-  updateColliders() {
+  updateColliders(matricesReady = false) {
     for (const r of this.colliders) {
-      r.node.updateWorldMatrix(true, false);
+      r.node.updateWorldMatrix(!matricesReady || !withinRoot(this.root, r.node), false);
       r.shape.offset.copy(vector(r.definition.offset)).applyMatrix4(r.node.matrixWorld);
       if (r.definition.shape === "plane") {
         r.shape.normal.copy(vector(r.definition.normal)).applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(r.node.matrixWorld));
@@ -310,18 +314,34 @@ export class ModelPhysics {
         r.shape.halfAxes.forEach((axis, i) => axis.fromArray(r.definition.halfAxes[i]).applyMatrix3(linear));
       } else r.shape.radius = r.definition.radius * scaleOf(r.node);
       if (r.tailNode) {
-        r.tailNode.updateWorldMatrix(true, false);
+        r.tailNode.updateWorldMatrix(!matricesReady || !withinRoot(this.root, r.tailNode), false);
         r.shape.tail.copy(vector(r.definition.tail.offset)).applyMatrix4(r.tailNode.matrixWorld);
       }
       r.collider.updateWorldMatrix(false, false);
     }
   }
 
-  step() {
-    this.updateColliders();
+  refreshWorldMatrices() {
+    this.root.updateWorldMatrix(true, false);
+    // Preserve updateMatrixWorld overrides, including SkinnedMesh bind matrices.
+    this.root.updateMatrixWorld(true);
+    // Resolvers may reference nodes outside the model's subtree.
+    if (this.motionReference && !withinRoot(this.root, this.motionReference)) {
+      this.motionReference.updateWorldMatrix(true, false);
+    }
+    for (const r of this.records) if (!withinRoot(this.root, r.node)) r.node.updateWorldMatrix(true, true);
+    for (const r of this.colliders) {
+      if (!withinRoot(this.root, r.node)) r.node.updateWorldMatrix(true, false);
+      if (r.tailNode && !withinRoot(this.root, r.tailNode)) r.tailNode.updateWorldMatrix(true, false);
+    }
+  }
+
+  step(matricesReady = false) {
+    if (!matricesReady) this.refreshWorldMatrices();
+    this.updateColliders(true);
     for (const r of this.records) {
       r.node.quaternion.copy(r.base);
-      r.node.updateWorldMatrix(true, false);
+      r.node.updateWorldMatrix(!withinRoot(this.root, r.node), false);
       r.anchor.matrix.copy(r.node.matrixWorld);
       r.anchor.updateMatrixWorld(true);
       this.activeOrigin.setFromMatrixPosition(r.anchor.matrixWorld);
@@ -330,37 +350,38 @@ export class ModelPhysics {
       r.node.quaternion.copy(r.base).multiply(r.bone.quaternion);
       r.node.updateWorldMatrix(false, true);
     }
-    this.solveCollisionEdges();
+    this.solveCollisionEdges(true);
   }
 
   /** Preserve a corrected pose in public VRM particle state without rebasing animation. */
   syncPose() {
     if (!this.enabled) return;
-    this.root.updateMatrixWorld(true);
+    this.refreshWorldMatrices();
     for (const r of this.records) {
       if (r.output.equals(r.node.quaternion) && r.outputWorld.equals(r.node.matrixWorld)) continue;
-      this.syncRecord(r);
+      this.syncRecord(r, true);
       r.output.copy(r.node.quaternion);
       r.outputWorld.copy(r.node.matrixWorld);
     }
   }
 
-  syncRecord(r) {
-    r.node.updateWorldMatrix(true, false);
+  syncRecord(r, matricesReady = false) {
+    r.node.updateWorldMatrix(!matricesReady || !withinRoot(this.root, r.node), false);
     // reset() restores the joint's identity quaternion. Temporarily anchor
     // that identity at the corrected pose so both particles start there.
     const final = r.node.quaternion.clone();
     r.anchor.matrix.copy(r.node.matrixWorld); r.anchor.updateMatrixWorld(true);
     r.joint.reset();
-    r.node.quaternion.copy(r.base); r.node.updateWorldMatrix(true, false);
+    r.node.quaternion.copy(r.base); r.node.updateWorldMatrix(false, false);
     r.anchor.matrix.copy(r.node.matrixWorld); r.anchor.updateMatrixWorld(true);
     r.node.quaternion.copy(final); r.node.updateWorldMatrix(false, true);
     r.bone.quaternion.copy(r.base).invert().multiply(r.node.quaternion);
     r.bone.updateMatrixWorld(true);
   }
 
-  solveCollisionEdges() {
+  solveCollisionEdges(matricesReady = false) {
     if (!this.collisionEdges.length) return;
+    if (!matricesReady) this.refreshWorldMatrices();
     const a = new THREE.Vector3(), b = new THREE.Vector3(), origin = new THREE.Vector3();
     const axis = new THREE.Vector3(), tangent = new THREE.Vector3(), desired = new THREE.Vector3();
     const rotation = new THREE.Quaternion(), parentRotation = new THREE.Quaternion();
@@ -369,8 +390,10 @@ export class ModelPhysics {
       let touching = false;
       for (const edge of this.collisionEdges) for (const collider of edge.colliders) {
         const [left, right] = edge.records;
-        left.node.localToWorld(a.fromArray(left.definition.tail));
-        right.node.localToWorld(b.fromArray(right.definition.tail));
+        if (!withinRoot(this.root, left.node)) left.node.updateWorldMatrix(true, false);
+        if (!withinRoot(this.root, right.node)) right.node.updateWorldMatrix(true, false);
+        a.fromArray(left.definition.tail).applyMatrix4(left.node.matrixWorld);
+        b.fromArray(right.definition.tail).applyMatrix4(right.node.matrixWorld);
         const ra = left.definition.radius * scaleOf(left.node), rb = right.definition.radius * scaleOf(right.node);
         const contact = this.edgeContact.query(a, b, ra, rb, collider);
         if (contact.distance >= -1e-6 * Math.max(1e-3, a.distanceTo(b))) continue;
@@ -378,7 +401,7 @@ export class ModelPhysics {
         const weights = [1 - contact.t, contact.t], tangents = [];
         let denominator = 0;
         edge.records.forEach((r, i) => {
-          r.node.getWorldPosition(origin);
+          origin.setFromMatrixPosition(r.node.matrixWorld);
           axis.copy(i ? b : a).sub(origin).normalize();
           tangent.copy(contact.normal).addScaledVector(axis, -contact.normal.dot(axis));
           tangents.push(tangent.clone());
@@ -386,7 +409,7 @@ export class ModelPhysics {
         });
         if (denominator < 1e-12) continue;
         edge.records.forEach((r, i) => {
-          r.node.getWorldPosition(origin);
+          origin.setFromMatrixPosition(r.node.matrixWorld);
           axis.copy(i ? b : a).sub(origin);
           desired.copy(axis).addScaledVector(tangents[i], -contact.distance * weights[i] / denominator);
           if (!axis.lengthSq() || !desired.lengthSq()) return;
@@ -399,16 +422,16 @@ export class ModelPhysics {
       }
       if (!touching) break;
     }
-    for (const r of changed) this.syncRecord(r);
+    for (const r of changed) this.syncRecord(r, true);
   }
 
   update(delta) {
     if (!Number.isFinite(delta) || delta < 0) throw new Error("physics delta 必须为非负有限数");
     for (const r of this.records) r.base.copy(r.node.quaternion);
     if (!this.enabled) return;
-    this.root.updateMatrixWorld(true);
+    this.refreshWorldMatrices();
     if (this.motionReference && this.referenceRadius > 0) {
-      this.motionReference.getWorldPosition(this.referencePosition);
+      this.referencePosition.setFromMatrixPosition(this.motionReference.matrixWorld);
       // A whole-rig displacement exceeding its diameter in one simulation
       // step is a teleport (e.g. a translating clip wrapping to its start).
       // Keeping the old world-space particles would inject a huge impulse.
@@ -429,12 +452,12 @@ export class ModelPhysics {
       }
       // Settle initial overlap before the first displayed frame; this does not
       // change the animation/rest pose and is not a replacement default pose.
-      for (let i = 0; i < this.warmupSteps; i += 1) this.step();
+      for (let i = 0; i < this.warmupSteps; i += 1) this.step(true);
       this.needsReset = false;
     }
     this.accumulator += Math.min(delta, 0.1);
     while (this.accumulator + 1e-10 >= STEP) {
-      this.step();
+      this.step(true);
       this.accumulator -= STEP;
     }
     // Also retain the last simulated result on frames below one fixed step.

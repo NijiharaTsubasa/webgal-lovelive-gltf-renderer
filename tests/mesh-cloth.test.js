@@ -569,3 +569,166 @@ test("cloth writeback still rejects each non-finite coordinate before writing ge
     point.copy(original);
   } finally { sim.destroy(); }
 });
+
+test("cloth samples only nonzero bones referenced by its primitive", async () => {
+  const f = fixture(), unused = new THREE.Bone(), zeroWeight = new THREE.Bone();
+  f.root.add(unused, zeroWeight); f.root.updateMatrixWorld(true);
+  f.mesh.bind(new THREE.Skeleton([f.bone, unused, zeroWeight]));
+  f.geometry.setIndex([0, 1, 5]); f.cloth.fixed = [0];
+  f.physics.colliders = []; f.cloth.colliders = [];
+  const joints = f.geometry.getAttribute("skinIndex");
+  for (let i = 0; i < joints.count; i++) joints.setXYZW(i, 0, 2, 2, 2);
+  joints.setX(24, 1); // Positive weight, but outside this primitive.
+  for (const bone of [unused, zeroWeight]) {
+    Object.defineProperty(bone, "matrixWorld", { get() { throw new Error("unused bone matrix read"); } });
+  }
+  const sim = await f.create();
+  try {
+    const cloth = sim.records[0];
+    assert.deepEqual(cloth.skinBoneIndices, [0]);
+    for (const index of [1, 2]) {
+      cloth.skinPalette[index].multiplyMatrices = () => { throw new Error("unused palette computed"); };
+    }
+    const originalTarget = cloth.targets[0].clone();
+    f.bone.position.x = .37; f.bone.updateWorldMatrix(true, false);
+    sim.beforeAnimation(); sim.update(1 / 60);
+    assert.ok(Math.abs(cloth.targets[0].x - originalTarget.x - .37) < 1e-12);
+  } finally { sim.destroy(); }
+});
+
+// Full-skeleton reference deliberately computes every bone, then derives
+// per-vertex skin matrices independently of the optimized binding cache.
+function fullPaletteReference(cloth) {
+  const mesh = cloth.mesh;
+  const palette = mesh.skeleton.bones.map((bone, i) => new THREE.Matrix4()
+    .multiplyMatrices(bone.matrixWorld, mesh.skeleton.boneInverses[i]));
+  const matrices = cloth.vertexBindings.map((binding, i) => binding
+    ? vertexSkinMatrix(mesh, i, new THREE.Matrix4(), palette) : null);
+  const morph = new THREE.Vector3();
+  const targets = cloth.topology.vertices.map(index => {
+    const base = morphTerms(mesh, index, "position", morph);
+    return new THREE.Vector3().fromBufferAttribute(cloth.sourcePosition, index)
+      .multiplyScalar(base).add(morph).applyMatrix4(matrices[index]).applyMatrix4(mesh.matrixWorld);
+  });
+  return { ...cloth, targets, inverseSkin: matrices.map(matrix => matrix?.invert()) };
+}
+
+test("referenced-bone sampling exactly matches full palettes with animated bindings and Morphs", async () => {
+  for (const relative of [true, false]) {
+    const f = fixture(), bones = [f.bone, new THREE.Bone(), new THREE.Bone(), new THREE.Bone()];
+    f.root.add(...bones.slice(1));
+    bones[1].position.set(.12, -.07, .23); bones[3].position.set(-.2, .15, .05);
+    f.root.position.set(.31, -.13, .17); f.root.rotation.set(.1, .2, -.07);
+    f.mesh.position.set(.19, -.23, .11); f.mesh.rotation.set(.17, -.11, .09); f.mesh.scale.set(.93, 1.07, 1.13);
+    f.root.updateMatrixWorld(true);
+    const bind = new THREE.Matrix4().compose(new THREE.Vector3(.21, -.14, .08),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(.13, -.18, .27)), new THREE.Vector3(1.1, .92, 1.04));
+    f.mesh.bind(new THREE.Skeleton(bones), bind); f.mesh.bindMode = THREE.DetachedBindMode;
+    const joints = f.geometry.getAttribute("skinIndex"), weights = f.geometry.getAttribute("skinWeight");
+    for (let i = 0; i < joints.count; i++) {
+      // Binding order is deliberately opposite to the skeleton index order;
+      // duplicate positive influences and zero-weight slots are both covered.
+      joints.setXYZW(i, 3, 1, 2, 3);
+      weights.setXYZW(i, i % 2 ? .25 : .5, i % 2 ? .625 : .5, 0, i % 2 ? .125 : 0);
+    }
+    for (const attribute of ["position", "normal"]) {
+      const base = f.geometry.getAttribute(attribute), morph = base.clone();
+      for (let i = 0; i < base.count; i++) morph.setXYZ(i,
+        (relative ? 0 : base.getX(i)) + .013 * Math.sin(i),
+        (relative ? 0 : base.getY(i)) + .017 * Math.cos(i),
+        (relative ? 0 : base.getZ(i)) + .021);
+      f.geometry.morphAttributes[attribute] = [morph];
+    }
+    f.geometry.morphTargetsRelative = relative; f.mesh.updateMorphTargets();
+    f.mesh.morphTargetInfluences[0] = .17;
+    f.physics.colliders = []; f.cloth.colliders = [];
+    const sim = await f.create();
+    try {
+      const cloth = sim.records[0], palette = [...cloth.skinPalette];
+      const references = cloth.skinBindings.map(binding => binding.influences.map(influence => influence.elements));
+      assert.deepEqual(cloth.skinBoneIndices, [1, 3]);
+      for (let frame = 0; frame < 9; frame++) {
+        sim.beforeAnimation();
+        bones[1].rotation.set(.019 * frame, -.011 * frame, .023 * frame);
+        bones[3].position.x = -.2 + .017 * frame; bones[3].scale.set(1 + .009 * frame, .97, 1.03);
+        f.root.rotation.y = .2 + .031 * frame; f.root.scale.set(1.13, .91, 1.07);
+        f.mesh.morphTargetInfluences[0] = [.17, .63, .41][frame % 3];
+        f.root.updateMatrixWorld(true); sim.update([1 / 120, 1 / 60, 1 / 30][frame % 3]);
+        const reference = fullPaletteReference(cloth), expected = referenceWriteback(reference);
+        assert.deepEqual(cloth.targets, reference.targets, `target coordinates differ at frame ${frame}`);
+        assert.deepEqual(cloth.position.array, expected.getAttribute("position").array);
+        assert.deepEqual(cloth.normal.array, expected.getAttribute("normal").array);
+        expected.dispose();
+        palette.forEach((matrix, i) => assert.equal(cloth.skinPalette[i], matrix));
+        cloth.skinBindings.forEach((binding, i) => binding.influences.forEach((influence, k) =>
+          assert.equal(influence.elements, references[i][k])));
+      }
+    } finally { sim.destroy(); }
+  }
+});
+
+test("identity bind fast path exactly matches full palettes through dynamic bind and hierarchy changes", async () => {
+  const f = fixture(); f.physics.colliders = []; f.cloth.colliders = [];
+  const sim = await f.create(), cloth = sim.records[0];
+  const parent = new THREE.Group(); f.root.add(parent); parent.add(f.mesh);
+  f.mesh.bindMode = THREE.DetachedBindMode;
+  let products = 0;
+  for (const binding of cloth.skinBindings) {
+    const multiply = binding.matrix.multiplyMatrices;
+    binding.matrix.multiplyMatrices = function(...args) { products++; return multiply.apply(this, args); };
+  }
+  try {
+    for (let frame = 0; frame < 16; frame++) {
+      parent.position.set(.013 * frame, -.02, .05);
+      parent.rotation.set(.02 * frame, -.01 * frame, .07);
+      parent.scale.set(1.1, .9 + .01 * frame, 1.2);
+      f.bone.rotation.set(.03 * frame, .07, -.01 * frame);
+      f.root.updateMatrixWorld(true);
+      const identity = frame % 2 === 0;
+      if (identity) { f.mesh.bindMatrix.identity(); f.mesh.bindMatrixInverse.identity(); }
+      else {
+        f.mesh.bindMatrix.makeRotationY(.2 + frame * .01).setPosition(.1, -.2, .3);
+        f.mesh.bindMatrixInverse.copy(f.mesh.bindMatrix).invert();
+      }
+      products = 0;
+      cloth.sampleTargets();
+      assert.equal(products, identity ? 0 : 2 * cloth.skinBindings.length);
+      const reference = fullPaletteReference(cloth);
+      assert.deepEqual(cloth.targets, reference.targets, `targets ${frame}`);
+      cloth.vertexBindings.forEach((binding, i) => {
+        if (binding) assert.deepEqual(binding.inverse.elements, reference.inverseSkin[i].elements, `inverse ${frame}/${i}`);
+      });
+    }
+  } finally { sim.destroy(); }
+});
+
+test("identity bind optimization preserves signed-zero and nonfinite multiplication behavior", async () => {
+  const f = fixture(); f.physics.colliders = []; f.cloth.colliders = [];
+  const sim = await f.create(), cloth = sim.records[0];
+  f.mesh.bindMode = THREE.DetachedBindMode;
+  f.bone.matrixWorldAutoUpdate = false;
+  f.mesh.skeleton.boneInverses[0].identity();
+  let products = 0;
+  for (const binding of cloth.skinBindings) {
+    const multiply = binding.matrix.multiplyMatrices;
+    binding.matrix.multiplyMatrices = function(...args) { products++; return multiply.apply(this, args); };
+  }
+  try {
+    for (const mode of ['weighted-negative-zero', 'bind-negative-zero', 'infinity', 'nan']) {
+      f.mesh.bindMatrix.identity(); f.mesh.bindMatrixInverse.identity();
+      f.bone.matrixWorld.identity();
+      if (mode === 'weighted-negative-zero') f.bone.matrixWorld.set(-1,-2,-3,-0, 0,1,0,0, 0,0,1,0, 0,0,0,1);
+      if (mode === 'bind-negative-zero') f.mesh.bindMatrix.elements[1] = -0;
+      if (mode === 'infinity') f.bone.matrixWorld.elements[0] = Infinity;
+      if (mode === 'nan') f.bone.matrixWorld.elements[0] = NaN;
+      products = 0;
+      cloth.sampleTargets();
+      assert.equal(products, 2 * cloth.skinBindings.length, `${mode} must retain the old products`);
+      const reference = fullPaletteReference(cloth);
+      assert.deepEqual(cloth.targets, reference.targets, mode);
+      cloth.vertexBindings.forEach((binding, i) => {
+        if (binding) assert.deepEqual(binding.inverse.elements, reference.inverseSkin[i].elements, `${mode}/${i}`);
+      });
+    }
+  } finally { sim.destroy(); }
+});

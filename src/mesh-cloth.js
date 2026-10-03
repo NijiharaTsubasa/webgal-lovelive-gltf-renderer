@@ -5,6 +5,14 @@ import { createJoltClothSolver } from "./jolt-cloth-solver.js";
 export { clothTopology, vertexSkinMatrix } from "./cloth-geometry.js";
 const STEP = 1 / 60;
 const UP = new THREE.Vector3(0, 1, 0);
+const isIdentity = (matrix) => matrix.elements.every((value, i) => Object.is(value, i % 5 === 0 ? 1 : 0));
+const identityPreserves = (elements) => {
+  for (let i = 0; i < 16; i += 1) {
+    const value = elements[i];
+    if (!Number.isFinite(value) || Object.is(value, -0)) return false;
+  }
+  return true;
+};
 
 class Cloth {
   constructor(root, definition, physics, resolve, resolvePrimitive) {
@@ -36,6 +44,7 @@ class Cloth {
       this.normals = this.targets.map(() => new THREE.Vector3());
       this.skinPalette = this.mesh.skeleton.bones.map(() => new THREE.Matrix4());
       this.skinBindings = [];
+      const usedBones = new Set();
       const bindings = new Map(), joints = this.geometry.getAttribute("skinIndex"), weights = this.geometry.getAttribute("skinWeight");
       this.vertexBindings = Array.from({ length: this.position.count }, (_, index) => {
         if (this.topology.mapping[index] < 0) return null;
@@ -45,13 +54,18 @@ class Cloth {
           const influences = [];
           for (let k = 0; k < 4; k += 1) {
             const weight = weights.getComponent(index, k);
-            if (weight) influences.push({ weight, elements: this.skinPalette[joints.getComponent(index, k)].elements });
+            if (weight) {
+              const joint = joints.getComponent(index, k);
+              usedBones.add(joint);
+              influences.push({ weight, elements: this.skinPalette[joint].elements });
+            }
           }
           binding = { index, influences, matrix: new THREE.Matrix4(), inverse: new THREE.Matrix4() };
           bindings.set(key, binding); this.skinBindings.push(binding);
         }
         return binding;
       });
+      this.skinBoneIndices = [...usedBones].sort((a, b) => a - b);
       this.inverseSkin = this.vertexBindings.map((binding) => binding?.inverse);
       this.inverseWorld = new THREE.Matrix4();
       this.normalToLocal = new THREE.Matrix3();
@@ -97,9 +111,10 @@ class Cloth {
     // separate GPU bone palette when it draws the SkinnedMesh.
     this.inverseWorld.copy(this.mesh.matrixWorld).invert();
     this.normalToLocal.setFromMatrix4(this.mesh.matrixWorld).transpose();
-    for (let i = 0; i < this.skinPalette.length; i += 1) {
+    for (const i of this.skinBoneIndices) {
       this.skinPalette[i].multiplyMatrices(this.mesh.skeleton.bones[i].matrixWorld, this.mesh.skeleton.boneInverses[i]);
     }
+    const identityBind = isIdentity(this.mesh.bindMatrixInverse) && isIdentity(this.mesh.bindMatrix);
     for (const binding of this.skinBindings) {
       // Skin indices/weights are immutable. Reuse their palette references,
       // avoiding per-vertex BufferAttribute dispatch and temporary matrices.
@@ -109,7 +124,11 @@ class Cloth {
         const influence = binding.influences[k];
         for (let j = 0; j < 16; j += 1) e[j] += influence.elements[j] * influence.weight;
       }
-      binding.matrix.premultiply(this.mesh.bindMatrixInverse).multiply(this.mesh.bindMatrix);
+      // Identity multiplication can normalize -0 or propagate nonfinite
+      // components through zero products; retain those arithmetic effects.
+      if (!identityBind || !identityPreserves(e)) {
+        binding.matrix.premultiply(this.mesh.bindMatrixInverse).multiply(this.mesh.bindMatrix);
+      }
       if (Math.abs(binding.matrix.determinant()) < 1e-12) throw new Error("cloth 蒙皮矩阵不可逆");
       binding.inverse.copy(binding.matrix).invert();
     }
