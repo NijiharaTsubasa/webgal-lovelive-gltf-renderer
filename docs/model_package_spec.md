@@ -16,6 +16,7 @@
 | `type` | string | 必需 | 固定为 `model` |
 | `name` | string | 必需 | 人类可读的模型名 |
 | `description` | string | 可选 | 人类可读描述 |
+| `preview` | string | 可选 | 供资源浏览使用的模型缩略图，格式为 `data:image/webp;base64,...`；图像背景透明 |
 | `group` | string | 条件必需 | head/body 组合兼容域；仅一体化模型可省略 |
 | `motionGroup` | string | 可选 | 非空的模型族专属动作兼容域；只控制匹配动作的 `groupTracks` |
 | `role` | string | 必需 | `integrated` / `head` / `body` 之一 |
