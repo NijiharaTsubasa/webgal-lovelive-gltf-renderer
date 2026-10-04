@@ -423,7 +423,9 @@ export class CharacterRenderer {
     this.parameterBody?.restore(); this.parameterBody = null;
     this.parameterPlayer?.setMotion(null);
     this.idlePose?.restore();
-    this.physics?.reset();
+    // Initialized cloth already owns its solver; align to the new pose and
+    // recover contacts while retaining the bone settling budget.
+    this.physics?.reset(30, this.physics.needsReset ? 30 : 2);
     if (change.parameterText !== undefined) {
       this.parameterPlayer.setMotion(change.parameterText, change.entry.component);
       this.parameterBody = new ParameterBodyPose(this.root, this.config.humanoidScale);

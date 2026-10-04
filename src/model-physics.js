@@ -153,6 +153,10 @@ export class ModelPhysics {
     const owned = new Set();
     root.updateMatrixWorld(true);
     this.motionReference = root.getObjectByName("Hips");
+    // Carry particles with whole-character travel without rotating their
+    // frame: local animation and turning still produce secondary motion.
+    this.translationCenter = new THREE.Object3D();
+    this.updateTranslationCenter();
     this.previousReferencePosition = new THREE.Vector3();
     this.referencePosition = new THREE.Vector3();
     this.referenceRadius = 0;
@@ -231,6 +235,7 @@ export class ModelPhysics {
           hitRadius: definition.radius * scaleOf(node),
           gravityDir: gravity.clone().normalize(), gravityPower: gravity.length(),
         }, [{ colliders: definition.colliders.map((i) => colliders[i]) }]);
+        joint.center = this.translationCenter;
         joint.setInitState();
         const record = { node, definition, anchor, bone, tail, joint, base: node.quaternion.clone(),
           output: node.quaternion.clone(), outputWorld: node.matrixWorld.clone() };
@@ -258,8 +263,8 @@ export class ModelPhysics {
     this.root.updateMatrixWorld(true);
   }
 
-  reset(warmupSteps = 30) {
-    this.meshCloth?.reset(warmupSteps);
+  reset(warmupSteps = 30, clothWarmupSteps = warmupSteps) {
+    this.meshCloth?.reset(clothWarmupSteps);
     this.warmupSteps = warmupSteps;
     this.needsReset = true;
     this.accumulator = 0;
@@ -334,6 +339,14 @@ export class ModelPhysics {
       if (!withinRoot(this.root, r.node)) r.node.updateWorldMatrix(true, false);
       if (r.tailNode && !withinRoot(this.root, r.tailNode)) r.tailNode.updateWorldMatrix(true, false);
     }
+    this.updateTranslationCenter();
+  }
+
+  updateTranslationCenter() {
+    const reference = this.motionReference ?? this.root;
+    reference.updateWorldMatrix(true, false);
+    const e = reference.matrixWorld.elements;
+    this.translationCenter.matrixWorld.makeTranslation(e[12], e[13], e[14]);
   }
 
   step(matricesReady = false) {
