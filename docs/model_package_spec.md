@@ -25,7 +25,7 @@
 | `expressionGroups` | `ExpressionGroup[]` | 条件必需 | `integrated` 与 `head` 必需；独立选择的表情分组，可为空；`body` 不声明；详见[表情标准](model_expression_spec.md) |
 | `expressions` | `ExpressionPreset[]` | 条件必需 | `integrated` 与 `head` 必需；整体组合预设，可为空；`body` 不声明；详见[表情标准](model_expression_spec.md) |
 | `defaultExpression` | string | 可选 | 引用 `expressions` 中的整体预设；省略时各组选择其第一个状态 |
-| `defaultMotion` | string | 可选 | 默认展示的动作清单 `name`；可用时按该动作自身的程序播放 |
+| `defaultMotion` | string | 可选 | 默认展示的动作资源标识；可用时按该动作自身的程序播放 |
 | `idlePose` | object | 可选 | 无动作时展示的单帧标准 Humanoid 姿态；见 §1.5 |
 | `humanoidScale` | number | 必需 | 当前 GLB 的静态人体尺度，必须为正有限数；供标准动作恢复 `Hips` 位移 |
 | `behaviors` | `BehaviorDeclaration[]` | 可选 | 当前组件声明的模型运行时 Behavior 及其参数；见 §1.8 |
@@ -59,7 +59,7 @@ body 才允许组合；跨 `group` 的组合必须在加载前被拒绝。
 ### 1.4 `motionGroup` 字段
 
 模型条目的 `motionGroup` 字段（string，可选）定义模型族专属动作轨道的兼容域。
-它与动作清单条目的同名字段比较，也用于匹配
+它与动作文件的同名字段比较，也用于匹配
 [参数驱动动作与表情扩展](parameter_driven_animation_spec.md)中的面部适配器。
 它不参与 head/body 组合判定，也不改变标准 Humanoid 骨骼动作的跨来源兼容性。
 
@@ -69,7 +69,7 @@ body 才允许组合；跨 `group` 的组合必须在加载前被拒绝。
 
 ### 1.5 默认展示姿态
 
-模型可声明 `defaultMotion` 和 `idlePose`。显示时优先播放可用的默认动作；未找到该动作时显示 `idlePose`；两者都不可用时显示 GLB 的标准中性姿势。下游应用仍可显式选择其他动作或静止姿态。`defaultMotion` 只按动作清单的 `name` 引用。
+模型可声明 `defaultMotion` 和 `idlePose`。显示时优先播放可用的默认动作；未找到该动作时显示 `idlePose`；两者都不可用时显示 GLB 的标准中性姿势。下游应用仍可显式选择其他动作或静止姿态。`defaultMotion` 由应用的动作资源查找逻辑解析。
 
 `idlePose.tracks` 是非空的单帧标准骨骼轨道列表。每项含标准 Humanoid `bone` 和四元数 `rotation: [x,y,z,w]`；只有 `Hips` 可另含 `translation: [x,y,z]`。数值语义与[标准动作](standardized_motion_spec.md) §1.2、§2.1–2.2 相同：旋转是相对模型 zero-muscle 中性局部旋转的增量，Hips 位移是经人体尺度归一化的模型空间增量。缺少可选骨时跳过对应轨道。
 

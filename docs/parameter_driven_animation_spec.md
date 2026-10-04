@@ -11,35 +11,29 @@
 本文规定参数含义、播放组合与适配接口；三维表达以正面及小角度观察时形似、神似
 为目标，不把二维形变解释成唯一、精确的三维姿态。
 
-## 1. 资源声明
+## 1. 资源格式与适配器声明
 
-资源使用[统一资源包清单](resource_package_spec.md)的 `components`。
-本扩展增加以下三种类型；类型名中的 `garupa` 标识本文限定的来源参数体系。
+来源动作以 `.mtn` 文件交付，来源表情以 `.exp.json` 文件交付。应用通过资源路径
+定位文件，并分别选择动作和表情；同名文件不隐含配对关系。
+动作采用 `500` 毫秒的淡入、淡出时间，表情的淡入淡出读取 `.exp.json`，见 §3.1。
 
-| `type` | 用途 | 必需字段 | 可选字段 |
-|---|---|---|---|
-| `garupa-motion` | 原始参数动作 | `name`、`src` | `description`、`fade_in`、`fade_out` |
-| `garupa-expression` | 原始参数表情 | `name`、`src` | `description` |
-| `garupa-expression-adapter` | 目标模型的面部适配器 | `name`、`motionGroup`、`script` | `description` |
+目标面部适配器使用[统一资源包清单](resource_package_spec.md)的 `components`，
+类型为 `garupa-expression-adapter`；`garupa` 标识本文限定的来源参数体系。
 
-### 1.1 字段
+### 1.1 适配器字段
 
 | 字段 | 含义 |
 |---|---|
-| `name` | 非空资源名；不是需要解析的动作或情绪编码 |
+| `type` | `garupa-expression-adapter` |
+| `name` | 非空适配器资源名 |
 | `description` | 人类可读说明，可省略或为空字符串 |
-| `src` | 包内原始文件路径；动作使用 `.mtn`，表情使用 `.exp.json` |
-| `fade_in`、`fade_out` | 动作的淡入、淡出时间，单位毫秒；正值生效，省略或非正值采用默认值 `500` |
 | `motionGroup` | 此适配器处理的目标模型兼容域，非空字符串 |
 | `script` | 包内 JavaScript 模块路径，接口见 §5 |
 
-动作与表情分别以各自类型内的 `name` 标识，同一清单内不能重名；同名的动作和
-表情是两个独立资源，不隐含配对关系。适配器以 `motionGroup` 作为匹配键，
+除 `description` 外，以上字段均为必需。适配器以 `motionGroup` 作为匹配键，
 同一有效资源集合中一个域只能有一个适配器，不能按扫描顺序选择或覆盖。
 
-源动作、源表情不声明目标 `motionGroup`，同一份原文件可以用于不同三维模型。
-动作的淡入淡出由动作组件携带；
-表情的淡入淡出已在 `.exp.json` 内，不在清单重复保存。
+同一份来源动作或表情可以用于不同三维模型。
 
 ### 1.2 示例
 
@@ -47,45 +41,17 @@
 {
   "components": [
     {
-      "type": "garupa-motion",
-      "name": "anon/angry01",
-      "description": "生气动作",
-      "src": "anon/angry01.mtn",
-      "fade_in": 500,
-      "fade_out": 500
-    },
-    {
-      "type": "garupa-expression",
-      "name": "anon/smile01",
-      "description": "微笑表情",
-      "src": "anon/smile01.exp.json"
-    },
-    {
       "type": "garupa-expression-adapter",
-      "name": "llas-garupa-face",
-      "description": "LLAS 模型的参数表情适配",
-      "motionGroup": "llas",
+      "name": "face-adapter",
+      "description": "参数表情适配器",
+      "motionGroup": "example-face",
       "script": "face.js"
     }
   ]
 }
 ```
 
-文件可以平铺，也可以放在子目录。适配器可以随模型的 Shader、Behavior 一起
-交付；源动作和表情无需与适配器放在同一个包内。
-
-### 1.3 参数资源目录发现
-
-目录的 `config.json` 包含 `garupa-motion` 或 `garupa-expression`，或其
-`components` 为空时，可以自动发现该目录及子目录中的 `.mtn` 和 `.exp.json`。
-资源名为相对于该配置目录的文件路径，使用 `/` 分隔，并去掉对应扩展名。
-例如 `anon/angry01.mtn` 与 `anon/angry01.exp.json` 分别声明同名的动作和表情。
-子目录有自己的资源配置时，由该配置管理其目录内的资源。
-
-发现程序根据现有文件更新配置中的参数资源条目：新增文件加入，删除文件移除，
-已有文件保留其说明和动作淡入淡出设置；其他类型的组件保持原有声明。
-新增动作采用 `fade_in: 500`、`fade_out: 500`，表情淡入淡出读取 `.exp.json`。
-目录无组件时保留空 `components`，以便继续发现后来添加的文件。
+适配器文件可以平铺，也可以放在子目录，并可以随模型的 Shader、Behavior 一起交付。
 
 ## 2. 来源参数
 
@@ -256,7 +222,7 @@ MTN 停止或自然结束不自动重置全部参数；在未发生显式重置�
 
 ## 4. 身体与表情独立选择
 
-身体来源可以是标准三维动作或 `garupa-motion`；面部可以使用模型原生表情，
+身体来源可以是标准三维动作或 `.mtn` 参数动作；面部可以使用模型原生表情，
 也可以使用来源参数表情。换动作不清除所选表情，换表情不重启动作。
 
 | 组合 | 身体 | 面部 |
@@ -333,11 +299,11 @@ adapter.apply(parameters, {
 | 方法 | 职责 |
 |---|---|
 | `restore()` | 撤销上一帧适配器的临时覆盖，露出底层状态；未应用过时不做修改 |
-| `apply(parameters, frame)` | 在本帧底层动作与 Behavior 完成后应用面部结果，并保存恢复所需的底层值 |
+| `apply(parameters, frame)` | 在本帧底层动作、Behavior 与物理完成后应用面部结果，并保存恢复所需的底层值 |
 | `dispose()` | 撤销残余覆盖，释放实例创建的几何、材质等资源；不销毁模型共享资源 |
 
 创建成功并启用参数面部模式后，宿主暂停原生表情写入，但保留原生选择和控制值。
-每帧先 `restore()`，再执行底层动作与 Behavior，最后 `apply()`，随后进入绘制。
+每帧先 `restore()`，再取得底层动作、Behavior 与物理的结果，最后 `apply()`，随后进入绘制。
 停用或更换适配器时恢复底层状态，再恢复原生表情；模型卸载时销毁适配器。
 
 适配器只能覆盖自己使用的属性，不能每帧清空整个角色的 Morph 或重置全部
@@ -347,7 +313,7 @@ adapter.apply(parameters, {
 
 ## 6. 来源播放与现有规范
 
-本文是可选扩展，原 `motion` 与模型自带表情的格式不变。模型的有效
+标准动作与模型自带表情分别遵循其对应规范。模型的有效
 `motionGroup` 用于适配器匹配；标准动作的 `motionGroup` 仍只决定其专属轨道匹配。
 
 参数含义与共享三维映射依据见[身体参数测量](live2d-body-mapping-evidence.md)、

@@ -1,6 +1,6 @@
 # 标准动作包与参数化播放器规范
 
-本文规定标准动作正文的字段、数值语义、存储编码和通用播放器行为。模型骨架、参考姿势和蒙皮须符合 [Humanoid 模型归一化标准](standardized_model_spec.md)；材质与 Shader 的参数化规则见 [参数化渲染标准](parameterized_rendering_spec.md)。
+本文规定标准动作文件的字段、数值语义、存储编码和通用播放器行为。模型骨架、参考姿势和蒙皮须符合 [Humanoid 模型归一化标准](standardized_model_spec.md)；材质与 Shader 的参数化规则见 [参数化渲染标准](parameterized_rendering_spec.md)。
 
 Behavior 可读取动作定义及已完成求值的运行状态，接口见
 [model_behavior_spec.md](model_behavior_spec.md) §6.2、§6.3。查询不改变播放行为，
@@ -16,30 +16,17 @@ Behavior 可读取动作定义及已完成求值的运行状态，接口见
 
 ---
 
-## 1. 动作清单与标准动作正文
+## 1. 标准动作文件
 
-动作的身份、描述、兼容域和正文路径位于[统一资源包清单](resource_package_spec.md)的
-`components[]` 条目中；`src` 指向的动作正文只保存播放数据。一份清单可以列出多个动作，
-也可以与模型、Shader 或其他资源共同交付。
-
-```json
-{
-  "components": [
-    {
-      "type": "motion",
-      "name": "motion_name",
-      "description": "Human-readable description",
-      "motionGroup": "example-game",
-      "src": "motions/motion.json"
-    }
-  ]
-}
-```
-
-动作正文：
+每个动作文件自包含其名称、描述、兼容域和全部播放数据。文件可采用纯 JSON 或
+单文件二进制编码，两种编码任选其一，见 §1.4。元数据和播放数据位于同一根对象：
 
 ```json
 {
+  "type": "motion",
+  "name": "motion_name",
+  "description": "Human-readable description",
+  "motionGroup": "example-family",
   "clips": [],
   "auxiliaryClips": [],
   "leftHandPoses": [],
@@ -48,7 +35,7 @@ Behavior 可读取动作定义及已完成求值的运行状态，接口见
 }
 ```
 
-动作清单条目：
+动作元数据：
 
 | 字段 | 类型 | 约束与含义 |
 |---|---|---|
@@ -56,9 +43,11 @@ Behavior 可读取动作定义及已完成求值的运行状态，接口见
 | `name` | string | 必需，非空的人类可读动画名 |
 | `description` | string，可选 | 人类可读描述；无描述时可省略或使用空字符串 |
 | `motionGroup` | string，可选 | 非空的动作扩展兼容域；只控制 `groupTracks` 是否生效，不影响标准 Humanoid 轨道 |
-| `src` | string | 必需，动作正文相对所在 `config.json` 的包内路径；以 `.json` 或 `.motionbin` 结尾，见 §1.4 |
 
-动作正文顶层字段：
+`name` 保存来源动作的可读名称，与文件名及所在目录独立。应用根据资源路径或其
+资源标识定位动作文件，加载后读取文件内的元数据与播放数据。
+
+播放数据顶层字段：
 
 | 字段 | 类型 | 约束与含义 |
 |---|---|---|
@@ -173,7 +162,7 @@ frame = min(frames - 1, floor(clipTime * sampleRate))
 
 `groupTracks` 与所属 Clip 使用相同的 `duration`、`sampleRate`、`frames` 和阶梯采样规则。它跟随 Program 基础 Layer 当前引用的 Clip 播放，不参与 Humanoid Additive Layer 或手部 PoseSlot 的合成。
 
-播放器只在动作清单条目与模型条目都声明了非空 `motionGroup`，并且两个值完全相同
+播放器只在动作文件与模型条目都声明了非空 `motionGroup`，并且两个值完全相同
 时应用 `groupTracks`。缺失或不匹配时必须忽略全部 `groupTracks`，但仍正常播放
 `tracks`、状态机、Additive Layer 和 PoseSlot。`motionGroup` 不参与 head/body 组合判定，
 也不能替代标准 Humanoid 兼容性。
@@ -185,10 +174,13 @@ frame = min(frames - 1, floor(clipTime * sampleRate))
 
 ### 1.4 存储编码
 
-每条 motion 清单只需提供一个 `src`，指向以下两种编码之一；不要求同时提供两份
-正文。同一清单中的不同动作可以分别选择编码。纯 JSON 编码沿用以上结构，`src`
-以 `.json` 结尾；单文件二进制编码以 `.motionbin` 结尾。两种编码表示同一份动作
-数据，不改变字段含义、轨道采样或播放规则。资源清单不增加编码标记字段。
+一个动作可选择以下任一种编码交付：
+
+- 纯 JSON 编码：文件以 `.json` 结尾，保存本节定义的完整根对象。
+- 单文件二进制编码：文件以 `.motionbin` 结尾，将元数据、结构和采样数组存入同一文件。
+
+两种编码是同一份自包含动作数据的可选表示，任选一种即可。它们具有相同的字段含义、
+轨道采样和播放规则。
 
 `.motionbin` 的字节布局如下：
 
@@ -196,12 +188,13 @@ frame = min(frames - 1, floor(clipTime * sampleRate))
 |---|---|
 | 1 | 8 字节文件签名：ASCII `MOTION` 后接两个零字节 |
 | 2 | 4 字节无符号小端整数：紧随其后的 UTF-8 JSON 头字节数 |
-| 3 | JSON 头：动作正文的全部结构、Program 和非采样字段 |
+| 3 | JSON 头：动作元数据、全部结构、Program 和非采样字段 |
 | 4 | 零字节填充，使后续二进制区起点相对文件起点对齐到 8 字节 |
 | 5 | 连续的采样数值数组，按各自描述符指定的位置读取 |
 
-JSON 头的 `clips`、`auxiliaryClips`、`leftHandPoses`、`rightHandPoses` 和
-`program` 与纯 JSON 编码相同。仅轨道内非空的 `rotation`、`translation`、
+JSON 头的 `type`、`name`、`description`、`motionGroup` 以及 `clips`、
+`auxiliaryClips`、`leftHandPoses`、`rightHandPoses` 和 `program` 与纯 JSON 编码相同；
+可选字段仍按各自规则省略。仅轨道内非空的 `rotation`、`translation`、
 `scale`、`values` 数组换成二进制区描述符，例如：
 
 ```json

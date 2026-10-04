@@ -1,7 +1,13 @@
 # 统一资源包清单规范
 
-本文规定模型、动作、Shader、Behavior 及后续资源类型共用的 `config.json`
+本文规定模型、Shader、Behavior 及其他组件资源共用的 `config.json`
 外层结构。各资源类型的专有字段由对应规范定义。
+
+标准动作以自包含的 `.json` 或 `.motionbin` 文件交付，字段与编码见
+[标准动作规范](standardized_motion_spec.md) §1。
+
+参数动作以 `.mtn` 文件、参数表情以 `.exp.json` 文件交付，格式与适配器声明见
+[参数驱动动作与表情规范](parameter_driven_animation_spec.md)。
 
 ## 1. 清单结构
 
@@ -14,7 +20,6 @@
       "type": "model", "name": "character", "role": "integrated", "model": "model.glb",
       "morphPoses": [], "expressionGroups": [], "expressions": [], "humanoidScale": 1
     },
-    { "type": "motion", "name": "idle", "src": "motions/idle.json" },
     {
       "type": "shader", "name": "toon", "src": "shaders/toon.glsl",
       "samplers": [], "passes": [{ "id": "Forward", "sections": {} }]
