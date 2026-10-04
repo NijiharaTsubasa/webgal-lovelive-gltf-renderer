@@ -4,6 +4,22 @@ import {readFile} from 'node:fs/promises';
 import calibration from '../src/garupa/body-calibration.js';
 import {createFixedBodyEvaluator} from '../src/garupa/body-mapping.mjs';
 import {createFixedBodyEvaluator as referenceEvaluator} from './fixtures/body-mapping-before-hand-cache.mjs';
+import {standardToWorld} from '../src/garupa/body-joint-space.mjs';
+import {Quaternion} from 'three';
+
+function assertPreservedPose(actual, reference, data = calibration) {
+  assert.deepStrictEqual(actual.hipsTranslation, reference.hipsTranslation);
+  assert.deepStrictEqual(actual.diagnostics, reference.diagnostics);
+  for (const name of Object.keys(actual.rotations)) {
+    if (!/^(Left|Right)(UpperArm|LowerArm|Hand)$/.test(name))
+      assert.deepStrictEqual(actual.rotations[name], reference.rotations[name], name);
+  }
+  if (!Object.values(actual.rotations).flat().every(Number.isFinite)) return;
+  const a = standardToWorld(data.seed.bones, actual.rotations, actual.hipsTranslation, data.seed.humanScale);
+  const b = standardToWorld(data.seed.bones, reference.rotations, reference.hipsTranslation, data.seed.humanScale);
+  for (const side of ['Left', 'Right']) assert.ok(new Quaternion().fromArray(a[side+'Hand'].rotation)
+    .angleTo(new Quaternion().fromArray(b[side+'Hand'].rotation)) < 1e-7, `${side} world palm`);
+}
 
 async function instrumentedModule() {
   const url=new URL('../src/garupa/body-mapping.mjs',import.meta.url);
@@ -50,7 +66,7 @@ test('head layers and independent body/arm inputs invalidate only their own last
   evaluate(p);assert.equal(module.takeCalls().length,0);
 });
 
-test('4096 changing, repeated and defaulted inputs preserve exact poses and bone key order',()=>{
+test('4096 changing, repeated and defaulted inputs match fresh evaluators and preserve non-arm semantics',()=>{
   const actual=createFixedBodyEvaluator(calibration),reference=referenceEvaluator(calibration);
   let seed=0x4182ab3d;
   const random=()=>((seed=(Math.imul(seed,1664525)+1013904223)>>>0)+.5)/4294967296;
@@ -69,9 +85,10 @@ test('4096 changing, repeated and defaulted inputs preserve exact poses and bone
     } else if(frame%4===1)input.PARAM_BREATH=random();
     else if(frame%4===2)input.PARAM_ANGLE_X=-30+60*random();
     else input.PARAM_MOUTH_OPEN_Y=random();
-    const output=actual(input),expected=reference(input);
+    const output=actual(input),expected=createFixedBodyEvaluator(calibration)(input);
     assert.deepStrictEqual(output,expected,`frame ${frame}`);
     assert.deepStrictEqual(Object.keys(output.rotations),Object.keys(expected.rotations));
+    assertPreservedPose(output,reference(input));
   }
 });
 
@@ -88,9 +105,11 @@ test('cached outputs stay private, calibration instances stay isolated, and spec
     {PARAM_ANGLE_X:NaN,PARAM_ANGLE_Y:NaN,PARAM_BODY_ANGLE_X:NaN},
     {PARAM_ANGLE_X:Infinity,PARAM_ANGLE_Y:-Infinity},{}];
   for(const input of inputs)for(let index=0;index<2;index++) {
-    const evaluate=evaluators[index],expected=references[index](input);
+    const evaluate=evaluators[index],data=index ? altered : calibration;
+    const expected=createFixedBodyEvaluator(data)(input);
     const first=evaluate(input),second=evaluate({...input});
     assert.deepStrictEqual(first,expected);assert.deepStrictEqual(second,expected);
+    assertPreservedPose(first,references[index](input),data);
     for(const [name,rotation]of Object.entries(first.rotations)) {
       assert.notStrictEqual(rotation,second.rotations[name]);rotation.fill(42);
     }

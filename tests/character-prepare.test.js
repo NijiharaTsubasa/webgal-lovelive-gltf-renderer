@@ -123,22 +123,31 @@ test('normal updates advance the blink clock once and apply the resulting host i
   assert.equal(actor.blink.eyeParamValue, .75);
 });
 
-test('zero-time frame realizes the parameter arm material variant before the host compiles it', () => {
-  const character = new CharacterRenderer({ renderer: {}, scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera() });
+test('parameter pose preparation retains normal materials and draws after shader runtime passes', () => {
+  const draws = [];
+  const character = new CharacterRenderer({ renderer: { render(scene, camera) {
+    assert.equal(scene, character.scene); assert.equal(camera, character.camera); draws.push('draw');
+  } }, scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera() });
   character.root = new THREE.Group();
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshStandardMaterial());
   character.root.add(mesh);
   let parameterTime = 2;
   character.parameterPlayer = { parameters: {}, update(delta) { parameterTime += delta; }, dispose() {} };
   character.parameterBody = { applyParameters() {}, restore() {} };
+  const geometry = mesh.geometry, material = mesh.material;
+  const key = material.customProgramCacheKey(), version = material.version;
   character.prepareFrame();
-  assert.ok(mesh.geometry.getAttribute('garupaArmRegions'));
-  assert.match(mesh.material.customProgramCacheKey(), /:garupa-arm-regions$/);
+  assert.equal(mesh.geometry, geometry);
+  assert.equal(mesh.material, material);
+  assert.equal(material.customProgramCacheKey(), key);
   assert.equal(parameterTime, 2);
-  const version = mesh.material.version, arms = character.parameterArmRenderer;
   character.prepareFrame();
-  assert.equal(character.parameterArmRenderer, arms);
   assert.equal(mesh.material.version, version);
+  character.shaderScope = { tick(scene, camera) {
+    assert.equal(scene, character.scene); assert.equal(camera, character.camera); draws.push('runtime');
+  }, dispose() {} };
+  character.render();
+  assert.deepEqual(draws, ['runtime', 'draw']);
   character.dispose(); mesh.geometry.dispose(); mesh.material.dispose();
 });
 

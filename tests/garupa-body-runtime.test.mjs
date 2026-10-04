@@ -14,6 +14,7 @@ test('shared runtime body mapping uses persistent calibration without source pla
     seen.add(url.href);
     const text = await readFile(url, 'utf8');
     assert.doesNotMatch(text, /source-data|source-core|node-source|loadMotion|parseMtn|sampleMtn/);
+    assert.doesNotMatch(text, /\beval\s*\(|new\s+Function\b|\bfetch\s*\(|\b(?:window|document)\s*\.|ShaderMaterial|WebGLRenderer/);
     for (const match of text.matchAll(/(?:import\s+(?:[^;]*?\s+from\s+)?|export\s+[^;]*?\s+from\s+)["']([^"']+)["']/g)) {
       const specifier = match[1];
       if (!specifier.startsWith('.')) {
@@ -27,7 +28,10 @@ test('shared runtime body mapping uses persistent calibration without source pla
   }
   await visit(new URL('../src/garupa/body-mapping.mjs', import.meta.url));
   await visit(new URL('../src/garupa/body-calibration.js', import.meta.url));
-  assert.equal(seen.size, 4);
+  assert.deepEqual([...seen].map(value => new URL(value).pathname.split('/').at(-1)).sort(), [
+    'body-arm-depth.mjs', 'body-arm-twist.mjs', 'body-calibration.js',
+    'body-joint-space.mjs', 'body-mapping.mjs', 'source-arm-order.mjs',
+  ]);
   const pose = createFixedBodyEvaluator(bodyCalibration)({});
   assert.deepEqual(Object.keys(pose.rotations), bodyCalibration.seed.bones.map(bone => bone.name));
   assert.ok(pose.hipsTranslation.every(Number.isFinite));

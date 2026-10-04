@@ -3,6 +3,7 @@
 import {Quaternion, Vector3} from 'three';
 import {blendRotations, orientSegment, standardToWorld, worldToStandard} from './body-joint-space.mjs';
 import {distributeArmTwist} from './body-arm-twist.mjs';
+import {createArmDepthAdjustment} from './body-arm-depth.mjs';
 
 const radians = d => d*Math.PI/180;
 const quat = a => new Quaternion().fromArray(a).normalize();
@@ -48,6 +49,7 @@ export function createFixedBodyEvaluator(calibration) {
   const {seed}=calibration,bones=seed.bones,neutral=seed.hands['01'];
   const metadata=Object.fromEntries(bones.map(b=>[b.name,b]));
   const neutralFK=standardToWorld(bones,neutral.rotations,neutral.hipsTranslation,seed.humanScale);
+  const adjustArmDepth=createArmDepthAdjustment(bones);
   const center = pose => vec(pose.LeftUpperArm.position).add(vec(pose.RightUpperArm.position)).multiplyScalar(.5);
   const shoulderWidth=vec(neutralFK.LeftUpperArm.position).distanceTo(vec(neutralFK.RightUpperArm.position));
   // The per-frame translation only reads the upper-arm centers. The full
@@ -153,13 +155,19 @@ export function createFixedBodyEvaluator(calibration) {
       };
       const {segmentTurn,lowerDepth}=arms[side].lower(p[arm.curves.lower.id]);
       const actualLowerAngle=-(delta.upper+bodyArm)+segmentTurn*180/Math.PI;
+      // Lowered hands need more room in front of the waist and skirt.
+      // Use the authored forearm direction so raised hands keep their pose.
+      const [lowerX,lowerY]=arm.directions.lower,lowerAngle=radians(actualLowerAngle);
+      const downward=-(lowerX*Math.sin(lowerAngle)+lowerY*Math.cos(lowerAngle))/Math.hypot(lowerX,lowerY);
+      const lowered=Math.max(0,Math.min(1,(downward-.35)/.5));
+      const upperDepth=.18+(.45+.10*lowered*lowered*(3-2*lowered)-.18)*(1-back);
       // Transport each approved template's arm twist along the authored
       // planar angle. An elbow-plane cross product is singular at straight
       // arms and would invent a 180-degree roll when the source crosses it.
       // Keeping template 01 arms for all hands would dump the other templates'
       // forearm twist into the wrist, even though the hand world pose is right.
       for(const [part,bone,child,angle,depth]of [
-        ['upper','UpperArm','LowerArm',angleUpper,.18*depthSign],
+        ['upper','UpperArm','LowerArm',angleUpper,upperDepth*depthSign],
         ['lower','LowerArm','Hand',actualLowerAngle,lowerDepth*depthSign]]) {
         const desired=direction(part,0,depth);
         const referenceRotation=part==='upper'?referenceUpper:referenceLower;
@@ -177,6 +185,7 @@ export function createFixedBodyEvaluator(calibration) {
       }
       handReferences[side]=hand;
     }
+    adjustArmDepth(world,p.PARAM_ARM_L_CHANGE,p.PARAM_ARM_R_CHANGE);
     const rotations=worldToStandard(bones,world,fingerRotations);
     const fk=standardToWorld(centerBones,rotations,neutral.hipsTranslation,seed.humanScale);
     // One common translation moves both shoulders and head. It never adds

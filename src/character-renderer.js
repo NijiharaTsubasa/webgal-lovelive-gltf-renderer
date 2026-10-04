@@ -12,7 +12,6 @@ import { createModelPhysics } from "./model-physics.js";
 import { IdlePose } from "./idle-pose.js";
 import { ParameterPlayer } from "./garupa/player.js";
 import { ParameterBodyPose } from "./garupa/body-pose.js";
-import { ParameterArmRenderer } from "./garupa/arm-renderer.js";
 import bodyCalibration from "./garupa/body-calibration.js";
 
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
@@ -57,7 +56,6 @@ export class CharacterRenderer {
     this.parameterExpressionGeneration = 0;
     this.parameterFaceActive = false;
     this.shaderScope = null;
-    this.parameterArmRenderer = null;
   }
 
   get faceCapabilities() { return this.face?.getCapabilities(); }
@@ -223,7 +221,6 @@ export class CharacterRenderer {
     this.setExternalExpressionDriver(null);
     this.parameterFaceActive = false;
     this.parameterBody?.restore(); this.parameterBody = null;
-    this.parameterArmRenderer?.dispose(); this.parameterArmRenderer = null;
     this.parameterPlayer?.dispose(); this.parameterPlayer = null;
     this.parts = [];
     this.physics?.destroy();
@@ -487,24 +484,12 @@ export class CharacterRenderer {
     this.physics?.update(0);
     this.behaviors?.afterPhysics();
     this.physics?.syncPose();
-    this.ensureRenderResources();
     return change;
   }
 
-  ensureRenderResources() {
-    let arms = null;
-    if (this.parameterBody) {
-      arms = this.parameterArmRenderer ??= new ParameterArmRenderer(this.root);
-      arms.setParameters(this.parameterPlayer.parameters);
-    }
-    return arms;
-  }
-
   render() {
-    const arms = this.ensureRenderResources();
     this.shaderScope?.tick(this.scene, this.camera);
-    if (arms) arms.drawScene(this.renderer, this.scene, this.camera);
-    else this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, this.camera);
   }
 
   dispose() { this.clear({ rememberFace: false }); }

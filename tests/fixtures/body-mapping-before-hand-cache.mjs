@@ -1,11 +1,12 @@
-// Test-only numerical oracle: body-mapping.mjs at dbe9a538e77205d8c8c93e7c0741bc34eb1c7c46.
-// Original SHA-256: b0efeaa5d14074469213c20c8d099c11749667d63966b4db2890abd313301854.
-// Only the two relative dependency imports were relocated for this fixture.
+// Test-only numerical oracle with uncached hand-reference and finger blending.
+// Hand arithmetic is frozen from dbe9a538e77205d8c8c93e7c0741bc34eb1c7c46;
+// arm placement follows the current mapping and its independently tested depth helper.
 // Shared authoring rules. Source curves are measured offline; depth is an
 // explicit shared 3D convention. No model, motion identity, fitting, or Unity.
 import {Quaternion, Vector3} from 'three';
 import {blendRotations, orientSegment, standardToWorld, worldToStandard} from '../../src/garupa/body-joint-space.mjs';
 import {distributeArmTwist} from '../../src/garupa/body-arm-twist.mjs';
+import {createArmDepthAdjustment} from '../../src/garupa/body-arm-depth.mjs';
 
 const radians = d => d*Math.PI/180;
 const quat = a => new Quaternion().fromArray(a).normalize();
@@ -32,6 +33,7 @@ export function createFixedBodyEvaluator(calibration) {
   const {seed}=calibration,bones=seed.bones,neutral=seed.hands['01'];
   const metadata=Object.fromEntries(bones.map(b=>[b.name,b]));
   const neutralFK=standardToWorld(bones,neutral.rotations,neutral.hipsTranslation,seed.humanScale);
+  const adjustArmDepth=createArmDepthAdjustment(bones);
   const center = pose => vec(pose.LeftUpperArm.position).add(vec(pose.RightUpperArm.position)).multiplyScalar(.5);
   const shoulderWidth=vec(neutralFK.LeftUpperArm.position).distanceTo(vec(neutralFK.RightUpperArm.position));
   const armReferences=Object.fromEntries(['Left','Right'].map(side=>[side,Object.fromEntries(Object.entries(seed.hands).map(([id,pose])=>{
@@ -100,6 +102,12 @@ export function createFixedBodyEvaluator(calibration) {
       const baseAngle=Math.atan2(arm.directions.lower[1],arm.directions.lower[0]);
       const segmentTurn=Math.atan2(-measured[1],measured[0])-baseAngle;
       const actualLowerAngle=-(delta.upper+bodyArm)+segmentTurn*180/Math.PI;
+      // Lowered hands need more room in front of the waist and skirt.
+      // Use the authored forearm direction so raised hands keep their pose.
+      const [lowerX,lowerY]=arm.directions.lower,lowerAngle=radians(actualLowerAngle);
+      const downward=-(lowerX*Math.sin(lowerAngle)+lowerY*Math.cos(lowerAngle))/Math.hypot(lowerX,lowerY);
+      const lowered=Math.max(0,Math.min(1,(downward-.35)/.5));
+      const upperDepth=.18+(.45+.10*lowered*lowered*(3-2*lowered)-.18)*(1-back);
       const lowerDepth=Math.sqrt(Math.max(.04,1-Math.min(1,measured[2])**2));
       // Transport each approved template's arm twist along the authored
       // planar angle. An elbow-plane cross product is singular at straight
@@ -107,7 +115,7 @@ export function createFixedBodyEvaluator(calibration) {
       // Keeping template 01 arms for all hands would dump the other templates'
       // forearm twist into the wrist, even though the hand world pose is right.
       for(const [part,bone,child,angle,depth]of [
-        ['upper','UpperArm','LowerArm',angleUpper,.18*depthSign],
+        ['upper','UpperArm','LowerArm',angleUpper,upperDepth*depthSign],
         ['lower','LowerArm','Hand',actualLowerAngle,lowerDepth*depthSign]]) {
         const desired=direction(part,0,depth);
         const referenceRotation=part==='upper'?referenceUpper:referenceLower;
@@ -121,6 +129,7 @@ export function createFixedBodyEvaluator(calibration) {
       for(const bone of bones.filter(b=>b.name.startsWith(side)&&/(Thumb|Index|Middle|Ring|Little)/.test(b.name)))
         fingerRotations[bone.name]=blendRotations(active.map(e=>({weight:e.weight,rotation:seed.hands[e.id].rotations[bone.name]})));
     }
+    adjustArmDepth(world,p.PARAM_ARM_L_CHANGE,p.PARAM_ARM_R_CHANGE);
     const rotations={...worldToStandard(bones,world),...fingerRotations};
     const fk=standardToWorld(bones,rotations,neutral.hipsTranslation,seed.humanScale);
     // One common translation moves both shoulders and head. It never adds
