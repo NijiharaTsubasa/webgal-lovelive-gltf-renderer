@@ -17,7 +17,9 @@ import bodyCalibration from "./garupa/body-calibration.js";
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
 // resource catalog, clock and UI; none of those are assumed to be a preview page.
 export class CharacterRenderer {
-  constructor({ renderer, scene, camera, loader = new GLTFLoader(), fetchResource = fetch, resourcePackages = new ResourcePackages({ fetchResource }) }) {
+  constructor({ renderer, scene, camera, loader = new GLTFLoader(), fetchResource = fetch, resourcePackages = new ResourcePackages({ fetchResource }), meshClothEnabled = true }) {
+    if (typeof meshClothEnabled !== "boolean") throw new Error("meshClothEnabled must be boolean");
+    this.meshClothEnabled = meshClothEnabled;
     this.resourcePackages = resourcePackages;
     this.renderer = renderer;
     this.scene = scene;
@@ -292,7 +294,7 @@ export class CharacterRenderer {
           context: { THREE, renderer: this.renderer, scene: this.scene, camera: this.camera, root },
         });
         await manager.initialize();
-        physics = await createModelPhysics(root, parts);
+        physics = await createModelPhysics(root, parts, { meshClothEnabled: this.meshClothEnabled });
         physics.setEnabled(this.physicsEnabled);
         if (generation !== this.generation) return null;
         shaderScope = shaders.createShaderRuntimeScope(this.renderer, this.resourcePackages.shaders);

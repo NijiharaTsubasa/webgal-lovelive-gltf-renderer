@@ -39,9 +39,10 @@ export class OffscreenCharacter {
     }));
   }
 
-  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing, motion = '', expression = '' }) {
+  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing, motion = '', expression = '', meshClothEnabled = true }) {
+    if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
     return JSON.stringify([new URL(modelUrl, globalThis.location?.href).href,
-      new URL(indexUrl, globalThis.location?.href).href, width, height, framing, motion, expression]);
+      new URL(indexUrl, globalThis.location?.href).href, width, height, framing, motion, expression, meshClothEnabled]);
   }
 
   static preload(options) { return warmed.preload(options); }
@@ -77,7 +78,9 @@ export class OffscreenCharacter {
     this.motionGeneration = 0;
   }
 
-  async load({ modelUrl, indexUrl, runtime, framing, motion = '', expression = '' }) {
+  async load({ modelUrl, indexUrl, runtime, framing, motion = '', expression = '', meshClothEnabled = true }) {
+    if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
+    this.character.meshClothEnabled = meshClothEnabled;
     this.catalog = await catalogFor(indexUrl);
     const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior'].includes(item.type)).map(item => item.config));
     for (const config of dependencyConfigs) {

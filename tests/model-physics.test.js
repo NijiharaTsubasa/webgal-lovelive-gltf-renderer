@@ -419,3 +419,34 @@ test("collision projection onto the joint pivot cannot poison the solver", () =>
   assert.ok(Math.abs(f.bone.quaternion.length() - 1) < 1e-7);
   sim.destroy();
 });
+
+
+test("disabling mesh cloth skips primitive construction while bone springs and the physics switch work", async () => {
+  const f = fixture();
+  f.physics.springs[0].gravity = [3, -2, 0];
+  f.physics.cloths = [{ node: 2, primitive: 0, fixed: [0], radius: .003,
+    stiffness: 12, damping: .8, gravity: [0, -9.8, 0], colliders: [0] }];
+  let primitiveLookups = 0;
+  const part = { component: { name: "cloth-and-hair", physics: f.physics },
+    gltf: { parser: { getDependencies: async () => f.nodes,
+      get json() { primitiveLookups++; throw new Error("cloth primitive construction reached"); } } } };
+  const sim = await createModelPhysics(f.root, [part], { meshClothEnabled: false });
+  try {
+    assert.equal(sim.meshCloth, undefined);
+    assert.equal(primitiveLookups, 0);
+    assert.equal(sim.records.length, 1);
+    sim.advance(0, () => {});
+    assert.ok(f.bone.quaternion.angleTo(new THREE.Quaternion()) > .001);
+    sim.setEnabled(false);
+    assert.equal(sim.enabled, false);
+    sim.setEnabled(true);
+    assert.equal(sim.enabled, true);
+  } finally { sim.destroy(); }
+  for (const options of [undefined, { meshClothEnabled: true }]) {
+    await assert.rejects(createModelPhysics(f.root, [part], options), /cloth primitive construction reached/);
+  }
+  assert.equal(primitiveLookups, 2);
+  for (const value of [null, 0, 1, "false"]) {
+    await assert.rejects(createModelPhysics(f.root, [part], { meshClothEnabled: value }), /meshClothEnabled must be boolean/);
+  }
+});

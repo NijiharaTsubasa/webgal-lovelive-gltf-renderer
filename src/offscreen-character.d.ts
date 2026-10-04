@@ -2,6 +2,8 @@ export interface OffscreenCharacterOptions {
   modelUrl: string;
   indexUrl: string;
   runtime: unknown;
+  /** Create mesh cloth simulation; defaults to true. Bone physics remains available. */
+  meshClothEnabled?: boolean;
   width?: number;
   height?: number;
   /** Initial playback state, prepared at time zero before the instance is returned. */

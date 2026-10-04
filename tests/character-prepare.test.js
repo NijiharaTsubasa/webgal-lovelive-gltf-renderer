@@ -191,3 +191,14 @@ test('warm identity separates initial playback state and ignores demand identity
   assert.notEqual(OffscreenCharacter.warmKey(options), OffscreenCharacter.warmKey({ ...options, expression: 'smile' }));
   assert.equal(OffscreenCharacter.warmKey(options), OffscreenCharacter.warmKey({ ...options, motion: '', expression: '', preloadId: 'other' }));
 });
+
+
+test('warm identity separates mesh cloth construction and normalizes the default', () => {
+  const options = { modelUrl: 'https://example.test/model/config.json', indexUrl: 'https://example.test/resources.json' };
+  assert.equal(OffscreenCharacter.warmKey(options), OffscreenCharacter.warmKey({ ...options, meshClothEnabled: true }));
+  assert.notEqual(OffscreenCharacter.warmKey(options), OffscreenCharacter.warmKey({ ...options, meshClothEnabled: false }));
+  for (const value of [null, 0, 1, 'false']) {
+    assert.throws(() => OffscreenCharacter.warmKey({ ...options, meshClothEnabled: value }), /meshClothEnabled must be boolean/);
+    assert.throws(() => new CharacterRenderer({ meshClothEnabled: value }), /meshClothEnabled must be boolean/);
+  }
+});

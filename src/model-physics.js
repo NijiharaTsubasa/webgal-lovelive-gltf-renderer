@@ -75,7 +75,8 @@ export function validatePhysics(value, source = "physics") {
 }
 
 /** Resolve original component indices, including core nodes replaced by composition. */
-export async function createModelPhysics(root, parts) {
+export async function createModelPhysics(root, parts, { meshClothEnabled = true } = {}) {
+  if (typeof meshClothEnabled !== "boolean") throw new Error("meshClothEnabled must be boolean");
   const definitions = [];
   const core = new Map();
   root.traverse((node) => { if (HUMANOID_BONE_NAMES.has(node.name)) core.set(node.name, node); });
@@ -125,7 +126,7 @@ export async function createModelPhysics(root, parts) {
   }
   const result = new ModelPhysics(root, definitions);
   try {
-    if (definitions.some(({ physics }) => physics.cloths?.length)) {
+    if (meshClothEnabled && definitions.some(({ physics }) => physics.cloths?.length)) {
       const { createMeshCloth } = await import("./mesh-cloth.js");
       result.meshCloth = await createMeshCloth(root, definitions);
     }

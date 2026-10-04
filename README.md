@@ -9,6 +9,8 @@ import { CharacterRenderer } from 'webgal-lovelive-gltf-renderer/character-rende
 
 `OffscreenCharacter` 管理单角色离屏画布、固定构图、资源清单及预热；`CharacterRenderer` 供自行管理 Three 场景、相机、时钟的宿主使用。既有接口保持不变，离屏入口类型见 `src/offscreen-character.d.ts`。
 
+创建选项 `meshClothEnabled` 控制网格布料，默认 `true`。设为 `false` 时保留骨骼弹簧物理；需要网格布料的实例在创建时启用该选项。
+
 所有资源文件格式由`docs`中的文档定义。文档为 AI 所写，可能较为难以理解，由于作者本人对该领域不熟悉，仅能做到大方向把控，无余力润色文档，还请见谅。
 
 ## 生成式人工智能使用声明
