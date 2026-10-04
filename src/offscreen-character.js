@@ -59,6 +59,7 @@ export class OffscreenCharacter {
 
   constructor({ width = 768, height = 1024 } = {}) {
     this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, stencil: true });
+    this.renderer.debug.checkShaderErrors = import.meta.env?.DEV === true;
     this.renderer.setSize(width, height, false);
     this.renderer.setClearColor(0, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;

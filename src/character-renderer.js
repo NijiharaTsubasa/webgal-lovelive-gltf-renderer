@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { ResourceGLTFLoader } from "./resource-gltf-loader.js";
 import * as shaders from "./parameterized-renderer.js";
 import { MotionPlayer } from "./motion-player.js";
 import { ExpressionController, registerExpressionNodes } from "./expression-controller.js";
@@ -17,7 +17,7 @@ import bodyCalibration from "./garupa/body-calibration.js";
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
 // resource catalog, clock and UI; none of those are assumed to be a preview page.
 export class CharacterRenderer {
-  constructor({ renderer, scene, camera, loader = new GLTFLoader(), fetchResource = fetch, resourcePackages = new ResourcePackages({ fetchResource }), meshClothEnabled = true }) {
+  constructor({ renderer, scene, camera, fetchResource = fetch, loader = new ResourceGLTFLoader(fetchResource), resourcePackages = new ResourcePackages({ fetchResource }), meshClothEnabled = true }) {
     if (typeof meshClothEnabled !== "boolean") throw new Error("meshClothEnabled must be boolean");
     this.meshClothEnabled = meshClothEnabled;
     this.resourcePackages = resourcePackages;
@@ -261,7 +261,10 @@ export class CharacterRenderer {
     this.clear();
     const generation = this.generation;
     const loadPromise = Promise.all(entries.map(async (entry) => {
-      const gltf = await this.loader.loadAsync(`${packagesRoot}${entry.basePath}/${entry.component.model}`);
+      const basePath = `${packagesRoot}${entry.basePath.replace(/\/?$/, "/")}`;
+      const modelUrl = URL.canParse(basePath)
+        ? new URL(entry.component.model, basePath).href : `${basePath}${entry.component.model}`;
+      const gltf = await this.loader.loadAsync(modelUrl);
       registerExpressionNodes(gltf);
       return { role: entry.component.role, component: entry.component, gltf,
         root: gltf.scene, nodesByName: indexNodesByName(gltf.scene) };
