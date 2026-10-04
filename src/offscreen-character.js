@@ -5,6 +5,7 @@ import { expandParameterManifest, ExpressionAdapterRegistry } from './garupa/man
 import { HostBlink } from './host-blink.js';
 import { frameCharacterCamera } from './camera-framing.js';
 import { CharacterWarmPool } from './character-warm-pool.js';
+import { prepareSceneTextures, yieldPreparationTask } from './texture-preparation.js';
 
 const catalogs = new Map();
 const warmed = new CharacterWarmPool({
@@ -111,12 +112,22 @@ export class OffscreenCharacter {
     if (this.disposed) return;
     if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
     this.applyHostInputs();
+    // Initial adapter construction, pose settling and compile submission are
+    // separate work units so they do not block foreground playback together.
+    if (!this.prepared) await yieldPreparationTask();
+    if (this.disposed) return;
     this.character.prepareFrame();
+    if (this.disposed) return;
+    if (!this.prepared) await yieldPreparationTask();
+    if (this.disposed) return;
     await this.renderer.compileAsync(this.scene, this.camera);
+    if (this.disposed) return;
+    await prepareSceneTextures(this.renderer, this.scene, { cancelled: () => this.disposed });
     if (this.disposed) return;
     if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
     this.character.render();
     if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
+    this.prepared = true;
   }
 
   async setMotion(name) {

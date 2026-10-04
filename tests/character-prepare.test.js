@@ -8,7 +8,7 @@ import { HostBlink } from '../src/host-blink.js';
 
 function offscreenFixture({ character, ...options }) {
   return Object.assign(Object.create(OffscreenCharacter.prototype), {
-    disposed: false, scene: {}, camera: {}, mouth: null, blink: new HostBlink({}, () => .5),
+    disposed: false, scene: new THREE.Scene(), camera: {}, mouth: null, blink: new HostBlink({}, () => .5),
     character: { setBlink() {}, setSpeech() {}, ...character }, ...options,
   });
 }
@@ -28,6 +28,16 @@ function fixture() {
   character.behaviors = { beforeMotion(delta) { steps.push(delta); }, afterMotion() {}, afterPhysics() {}, setMotion() {}, destroy() {} };
   return { character, steps, expression };
 }
+
+test('disposal during the initial preparation yield prevents touching released pose and GPU state', async () => {
+  const calls = [];
+  const actor = offscreenFixture({ character: { prepareFrame() { calls.push('pose'); }, render() { calls.push('draw'); } },
+    renderer: { getContext: () => ({ isContextLost: () => false }), compileAsync: async () => calls.push('compile') } });
+  const preparing = actor.prepare();
+  actor.disposed = true;
+  await preparing;
+  assert.deepEqual(calls, []);
+});
 
 test('zero-time prepare evaluates expressions on a settled fixed-step actor', () => {
   const { character, steps, expression } = fixture();
@@ -152,11 +162,13 @@ test('parameter pose preparation retains normal materials and draws after shader
 });
 
 test('an actor disposed during compile cannot render into its released context', async () => {
-  let finish;
+  let finish, started;
+  const compiling = new Promise(resolve => { started = resolve; });
   const actor = offscreenFixture({ character: {
     prepareFrame() {}, render() { assert.fail('disposed actor rendered'); },
-  }, renderer: { compileAsync: () => new Promise(resolve => { finish = resolve; }) } });
+  }, renderer: { compileAsync: () => new Promise(resolve => { finish = resolve; started(); }) } });
   const pending = OffscreenCharacter.prototype.prepare.call(actor);
+  await compiling;
   actor.disposed = true; finish(); await pending;
 });
 

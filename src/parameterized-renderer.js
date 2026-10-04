@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { registerCompiledUniforms } from "./texture-preparation.js";
 import { applyRenderQueue } from "./render-order.js";
 import {
   createGltfTextureBinding,
@@ -246,7 +247,7 @@ function injectSections(shader, sections) {
   return shader;
 }
 
-function makePatcher(preparedShader, materialPass, tex, runtimes) {
+function makePatcher(preparedShader, materialPass, tex, runtimes, material) {
   return (shader) => {
     const { samplers } = preparedShader;
     injectSections(shader, materialPass.sections);
@@ -258,6 +259,7 @@ function makePatcher(preparedShader, materialPass, tex, runtimes) {
         Object.assign(shader.uniforms, runtime.getUniforms(materialPass.id, materialPass));
       }
     }
+    registerCompiledUniforms(material, shader.uniforms);
   };
 }
 
@@ -267,7 +269,7 @@ function makePassMaterial(shaderName, preparedShader, source, materialPass, tex,
   material.userData.__parameterizedShader = shaderName;
   material.userData.__parameterizedPassId = materialPass.id;
   material.userData.__parameterizedShaderRuntimes = runtimes;
-  material.onBeforeCompile = makePatcher(preparedShader, materialPass, tex, runtimes);
+  material.onBeforeCompile = makePatcher(preparedShader, materialPass, tex, runtimes, material);
   applyRenderState(material, materialPass.renderState);
   return material;
 }
