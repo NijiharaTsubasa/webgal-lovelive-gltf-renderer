@@ -39,7 +39,7 @@ test("motion descriptors expand independently from payload data", () => {
   assert.equal(validateMotionManifest({ components: [{ type: "motion", name: "idle", src: "idle.motionbin" }] }).components[0].src, "idle.motionbin");
 });
 
-test("motion payload rejects manifest metadata", () => {
+test("motion payload accepts self-contained metadata and validates animation structure", () => {
   const payload = {
     clips: [],
     auxiliaryClips: [],
@@ -48,5 +48,8 @@ test("motion payload rejects manifest metadata", () => {
     program: { layers: [] },
   };
   assert.equal(validateMotionPayload(payload), payload);
-  assert.throws(() => validateMotionPayload({ ...payload, type: "motion" }), /不得包含 type/);
+  const standalone = { ...payload, type: "motion", name: "hasunosora/mot_00_02070", description: "引きずられ", motionGroup: "hasunosora" };
+  assert.equal(validateMotionPayload(standalone), standalone);
+  assert.throws(() => validateMotionPayload({ ...standalone, clips: null }), /clips 必须是数组/);
+  assert.throws(() => validateMotionPayload({ ...standalone, program: null }), /program 必须包含 layers 数组/);
 });

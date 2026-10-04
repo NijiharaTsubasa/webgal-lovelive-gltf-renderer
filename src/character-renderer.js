@@ -114,6 +114,9 @@ export class CharacterRenderer {
         const response = await this.fetchResource(url);
         if (!response.ok) throw new Error(`${response.status} ${url}`);
         json = await response.json();
+        for (const key of ['fade_in', 'fade_out']) {
+          if (entry.component?.[key] !== undefined) json[key] = entry.component[key];
+        }
       } catch (error) {
         if (generation !== this.parameterExpressionGeneration || root !== this.root) return;
         throw error;

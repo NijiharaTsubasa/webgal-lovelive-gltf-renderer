@@ -29,9 +29,15 @@ async function catalogFor(url) {
 // No DOM mounting, ticker, Pixi objects or script syntax is owned here.
 // A host calls update before uploading canvas and disposes at final removal.
 export class OffscreenCharacter {
-  static async preloadNamed(indexUrl, requests) {
-    const catalog = await catalogFor(indexUrl);
+  static async preloadNamed(indexUrl, requests, resourceCatalog) {
+    const catalog = resourceCatalog ?? await catalogFor(indexUrl);
     await Promise.all(requests.map(async ({ kind, name }) => {
+      const resolver = kind === 'motion' ? catalog.resolveMotion : catalog.resolveExpression;
+      if (resolver) {
+        const entry = await resolver.call(catalog, name, { optional: true });
+        if (entry) await catalog.fetch(new URL(entry.component.src, entry.config).href, 'bytes');
+        return;
+      }
       const entry = kind === 'motion'
         ? catalog.find('motion', name) ?? catalog.find('garupa-motion', name)
         : catalog.find('garupa-expression', name);
@@ -80,10 +86,10 @@ export class OffscreenCharacter {
     this.motionGeneration = 0;
   }
 
-  async load({ modelUrl, indexUrl, runtime, framing, motion = '', expression = '', meshClothEnabled = true }) {
+  async load({ modelUrl, indexUrl, resourceCatalog, runtime, framing, motion = '', expression = '', meshClothEnabled = true }) {
     if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
     this.character.meshClothEnabled = meshClothEnabled;
-    this.catalog = await catalogFor(indexUrl);
+    this.catalog = resourceCatalog ?? await catalogFor(indexUrl);
     const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior'].includes(item.type)).map(item => item.config));
     for (const config of dependencyConfigs) {
       this.character.resourcePackages.register(await this.catalog.fetch(config), config);
@@ -136,10 +142,16 @@ export class OffscreenCharacter {
     const useDefault = !name;
     if (!name) name = this.character.config?.defaultMotion ?? '';
     if (!name) { await this.character.selectMotion(null); return; }
-    const indexed = this.catalog.find('motion', name) ?? this.catalog.find('garupa-motion', name);
-    if (!indexed && useDefault) { await this.character.selectMotion(null); return; }
-    const entry = await this.catalog.resolve(indexed);
+    let entry;
+    if (this.catalog.resolveMotion) {
+      entry = await this.catalog.resolveMotion(name, { optional: useDefault });
+    } else {
+      const indexed = this.catalog.find('motion', name) ?? this.catalog.find('garupa-motion', name);
+      if (indexed) entry = await this.catalog.resolve(indexed);
+      else if (!useDefault) entry = await this.catalog.resolve(indexed);
+    }
     if (this.disposed || generation !== this.motionGeneration) return;
+    if (!entry) { await this.character.selectMotion(null); return; }
     const url = new URL(entry.component.src, entry.config).href;
     if (entry.type === 'motion') await this.character.selectMotion(entry, url);
     else await this.character.selectParameterMotion(entry, url);
@@ -160,7 +172,9 @@ export class OffscreenCharacter {
       this.character.setExpression(name);
       return;
     }
-    const entry = await this.catalog.resolve(this.catalog.find('garupa-expression', name));
+    const entry = this.catalog.resolveExpression
+      ? await this.catalog.resolveExpression(name)
+      : await this.catalog.resolve(this.catalog.find('garupa-expression', name));
     if (this.disposed || generation !== this.expressionGeneration) return;
     await this.character.selectParameterExpression(entry, new URL(entry.component.src, entry.config).href);
     if (this.disposed || generation !== this.expressionGeneration) return;

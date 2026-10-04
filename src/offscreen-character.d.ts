@@ -1,6 +1,26 @@
+export interface HostResourceEntry {
+  type: string;
+  name: string;
+  config: string;
+  component: Record<string, any>;
+  basePath: string;
+  motionGroup?: string;
+}
+/** Host-owned resource lookup, shared by preparation and playback. */
+export interface CharacterResourceCatalog {
+  entries: Array<{ type: string; name: string; config: string }>;
+  fetch(url: string, kind?: 'json' | 'bytes'): Promise<any>;
+  response(url: string): Promise<Response>;
+  model(configUrl: string): Promise<HostResourceEntry>;
+  preloadModelDependencies(model: HostResourceEntry): Promise<void>;
+  resolveMotion(name: string, options?: { optional?: boolean }): Promise<HostResourceEntry | null | undefined>;
+  resolveExpression(name: string, options?: { optional?: boolean }): Promise<HostResourceEntry | null | undefined>;
+}
 export interface OffscreenCharacterOptions {
   modelUrl: string;
   indexUrl: string;
+  /** Ready resource lookup supplied by the host; indexUrl identifies its resource scope. */
+  resourceCatalog?: CharacterResourceCatalog;
   runtime: unknown;
   /** Create mesh cloth simulation; defaults to true. Bone physics remains available. */
   meshClothEnabled?: boolean;
@@ -18,7 +38,7 @@ export class OffscreenCharacter {
   static create(options: OffscreenCharacterOptions): Promise<OffscreenCharacter>;
   static preload(options: OffscreenCharacterOptions): Promise<void>;
   static setPreloadRequests(options: OffscreenCharacterOptions[]): Promise<void>;
-  static preloadNamed(indexUrl: string, requests: Array<{ kind: 'motion' | 'expression'; name: string }>): Promise<void>;
+  static preloadNamed(indexUrl: string, requests: Array<{ kind: 'motion' | 'expression'; name: string }>, resourceCatalog?: CharacterResourceCatalog): Promise<void>;
   static takePreloaded(options: OffscreenCharacterOptions): Promise<OffscreenCharacter | null>;
   canvas: HTMLCanvasElement;
   setMotion(name: string): Promise<void>;

@@ -59,9 +59,6 @@ export function expandMotionManifest(config, configPath) {
 
 export function validateMotionPayload(payload, source = "motion.json") {
   if (!isManifestObject(payload)) fail(source, "动作正文必须是对象");
-  for (const metadata of ["type", "name", "description", "motionGroup"]) {
-    if (metadata in payload) fail(source, `动作正文不得包含 ${metadata}`);
-  }
   for (const collection of ["clips", "auxiliaryClips", "leftHandPoses", "rightHandPoses"]) {
     if (!Array.isArray(payload[collection])) fail(source, `${collection} 必须是数组`);
   }
