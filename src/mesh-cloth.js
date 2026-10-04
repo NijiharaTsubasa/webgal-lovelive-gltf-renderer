@@ -167,13 +167,14 @@ class Cloth {
   }
 
   initialize() {
-    this.solver.reset(this.targets, this.colliderPoses(), this.radius());
+    const colliders = this.colliderPoses(), radius = this.radius();
+    this.solver.reset(this.targets, colliders, radius);
     this.targets.forEach((v, i) => this.previousTargets[i].copy(v));
-    for (let i = 0; i < this.warmupSteps; i += 1) this.step(1);
+    for (let i = 0; i < this.warmupSteps; i += 1) this.step(1, 1, colliders, radius);
     this.needsReset = false;
   }
 
-  step(alpha, previousAlpha = alpha) {
+  step(alpha, previousAlpha = alpha, colliders = this.colliderPoses(), radius = this.radius()) {
     for (let i = 0; i < this.targets.length; i += 1) {
       this.stepTargets[i].lerpVectors(this.previousTargets[i], this.targets[i], alpha);
       this.stepPreviousTargets[i].lerpVectors(this.previousTargets[i], this.targets[i], previousAlpha);
@@ -181,7 +182,7 @@ class Cloth {
     this.solver.step({
       targets: this.stepTargets, previousTargets: this.stepPreviousTargets,
       stiffness: this.definition.stiffness, gravity: this.definition.gravity, delta: STEP,
-      colliders: this.colliderPoses(), radius: this.radius(),
+      colliders, radius,
     });
   }
 

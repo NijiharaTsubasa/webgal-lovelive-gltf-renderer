@@ -163,7 +163,7 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
     const skinCenter = own(J.RMat44.prototype.sIdentity());
     edges = Array.from({ length: shared.mEdgeConstraints.size() }, (_, i) => {
       const edge = shared.mEdgeConstraints.at(i);
-      return { edge, a: edge.get_mVertex(0), b: edge.get_mVertex(1) };
+      return { edge, a: edge.get_mVertex(0), b: edge.get_mVertex(1), restLength: NaN };
     });
     const create = new J.SoftBodyCreationSettings(shared, origin, quaternion, 1);
     create.mCollisionGroup = collisionGroup;
@@ -251,7 +251,7 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
       try { collider = bodyInterface.CreateBody(settings); } finally { J.destroy(settings); }
       bodies.push(collider); bodyInterface.AddBody(collider.GetID(), J.EActivation_DontActivate);
       colliderRecords.push({ body: collider, shape: pose.shape, radius: pose.radius, height: pose.height,
-        halfAxes: pose.halfAxes?.map((axis) => axis.clone()) });
+        halfAxes: pose.halfAxes?.map((axis) => axis.clone()), p: pose.p.clone(), q: pose.q.clone() });
     }
     const updateColliders = (poses) => {
       if (poses.length !== colliderRecords.length) throw new Error("cloth 碰撞体数量不能在运行中改变");
@@ -266,11 +266,20 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
           record.shape = pose.shape; record.radius = pose.radius; record.height = pose.height;
           record.halfAxes = pose.halfAxes?.map((axis) => axis.clone());
         }
-        setPose(record, pose);
+        if (!record.p.equals(pose.p) || !record.q.equals(pose.q)) {
+          setPose(record, pose); record.p.copy(pose.p); record.q.copy(pose.q);
+        }
       }
     };
     const updateRestLengths = (targets) => {
-      for (const { edge, a, b } of edges) edge.mRestLength = targets[a].distanceTo(targets[b]);
+      for (const record of edges) {
+        // The native setter stores float32. Rigid animated regions often keep
+        // the same stored length even while their world coordinates change.
+        const length = Math.fround(targets[record.a].distanceTo(targets[record.b]));
+        if (length !== record.restLength) {
+          record.edge.mRestLength = length; record.restLength = length;
+        }
+      }
     };
     const updateSkinReference = (targets, reset = false) => {
       const heap = J.HEAPF32;
@@ -288,6 +297,12 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
       // moving backwards pushes particles out of its obsolete previous plane.
       if (!reset) motion.SkinVertices(skinCenter, skinMatrices.data(), 1, false, worldState.world.GetTempAllocator());
     };
+    const reference = positions.map((p) => p.clone());
+    const updateReference = (targets, reset = false) => {
+      if (!reset && targets.every((p, i) => p.equals(reference[i]))) return;
+      updateRestLengths(targets); updateSkinReference(targets, reset);
+      targets.forEach((p, i) => reference[i].copy(p));
+    };
     const readPositions = () => {
       const heap = J.HEAPF32;
       for (let i = 0; i < vertices.length; i++) {
@@ -298,8 +313,8 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
     };
     const reset = (targets, poses, currentRadius = radius) => {
       if (disposed) throw new Error("cloth 求解器已经释放");
-      motion.SetVertexRadius(currentRadius); updateColliders(poses); updateRestLengths(targets);
-      updateSkinReference(targets, true);
+      motion.SetVertexRadius(currentRadius); updateColliders(poses);
+      updateReference(targets, true);
       const heap = J.HEAPF32;
       targets.forEach((p, i) => {
         writeVec3(heap, vertices[i].x, p.x, p.y, p.z); writeVec3(heap, vertices[i].q, p.x, p.y, p.z);
@@ -314,8 +329,8 @@ export async function createJoltClothSolver({ positions, indices, fixed, radius,
       step({ targets, previousTargets, stiffness, gravity, delta, colliders: poses, radius: currentRadius = radius }) {
         if (disposed) throw new Error("cloth 求解器已经释放");
         if (!Number.isFinite(delta) || delta <= 0) throw new Error("cloth 步长必须为正有限数");
-        motion.SetVertexRadius(currentRadius); updateColliders(poses); updateRestLengths(targets);
-        updateSkinReference(targets);
+        motion.SetVertexRadius(currentRadius); updateColliders(poses);
+        updateReference(targets);
         // Bullet's kDP is a per-step loss fraction, whereas Jolt damps each
         // native substep by (1 - coefficient * dt). This conversion preserves
         // the free-velocity retention (1-damping) across one complete step.

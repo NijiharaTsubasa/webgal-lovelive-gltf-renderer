@@ -107,6 +107,27 @@ function fixture() {
   return { root, mesh, bone, collider, geometry, cloth, physics, nodes, create };
 }
 
+test("frozen-pose warmup samples colliders once and matches thirty independent physics steps", async () => {
+  const f = fixture(), sim = await f.create(), cloth = sim.records[0];
+  try {
+    cloth.sampleTargets();
+    const colliderPoses = cloth.colliderPoses.bind(cloth);
+    let samples = 0;
+    cloth.colliderPoses = () => { samples++; return colliderPoses(); };
+    cloth.warmupSteps = 30; cloth.initialize();
+    assert.equal(samples, 1);
+    const settled = cloth.solver.positions.map((p) => p.clone());
+    cloth.solver.reset(cloth.targets, colliderPoses(), cloth.radius());
+    for (let i = 0; i < 30; i++) cloth.step(1);
+    settled.forEach((p, i) => assert.ok(p.distanceTo(cloth.solver.positions[i]) < 1e-6));
+    // A subsequent reset at another pose must replace the cached reference.
+    f.bone.position.set(2, -1, .4); f.root.updateMatrixWorld(true);
+    cloth.sampleTargets(); cloth.initialize();
+    cloth.topology.fixed.forEach((i) => assert.ok(cloth.solver.positions[i].distanceTo(cloth.targets[i]) < 1e-6));
+    assert.ok(cloth.solver.positions.every((p) => p.toArray().every(Number.isFinite)));
+  } finally { sim.destroy(); }
+});
+
 test("cloth fixed indices are bounded and topology retains skin bindings", () => {
   const f = fixture();
   const topology = clothTopology(f.geometry, f.cloth.fixed);
