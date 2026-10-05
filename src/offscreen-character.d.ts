@@ -17,6 +17,7 @@ export interface CharacterResourceCatalog {
   resolveExpression(name: string, options?: { optional?: boolean }): Promise<HostResourceEntry | null | undefined>;
 }
 export interface OffscreenCharacterOptions {
+  surface?: CharacterRenderSurface;
   modelUrl: string;
   indexUrl: string;
   /** Ready resource lookup supplied by the host; indexUrl identifies its resource scope. */
@@ -49,5 +50,17 @@ export class OffscreenCharacter {
     closingDuration: number; closedDuration: number; openingDuration: number }>): void;
   setMouth(value: number | null): void;
   update(delta: number): void;
+  dispose(): void;
+}
+
+/** A context shared by independently prepared actors; the host uploads its canvas. */
+export class CharacterRenderSurface {
+  constructor(options?: { width?: number; height?: number });
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+  disposed: boolean;
+  activate(actor: OffscreenCharacter): void;
+  deactivate(actor?: OffscreenCharacter): void;
   dispose(): void;
 }

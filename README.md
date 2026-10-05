@@ -7,7 +7,9 @@ import { OffscreenCharacter } from 'webgal-lovelive-gltf-renderer';
 import { CharacterRenderer } from 'webgal-lovelive-gltf-renderer/character-renderer.js';
 ```
 
-`OffscreenCharacter` 管理单角色离屏画布、固定构图、资源清单及预热；`CharacterRenderer` 供自行管理 Three 场景、相机、时钟的宿主使用。既有接口保持不变，离屏入口类型见 `src/offscreen-character.d.ts`。
+`OffscreenCharacter` 管理角色、固定构图、资源清单及预热；`CharacterRenderer` 供自行管理 Three 场景、相机、时钟的宿主使用。离屏入口类型见 `src/offscreen-character.d.ts`。
+
+宿主可创建 `CharacterRenderSurface({ width, height })`，并通过 `OffscreenCharacter.create({ ...options, surface })` 让多个角色驻留同一个画布和 WebGL 上下文。角色分别持有场景与播放状态；同一 surface 每次只激活一个角色。准备其他角色前先 `surface.deactivate()`，准备完成后用 `surface.activate(actor)` 选择绘制对象，再调用角色更新并上传画布。`actor.dispose()` 释放角色资源；`surface.dispose()` 释放驻留角色及上下文。
 
 创建选项 `meshClothEnabled` 控制网格布料，默认 `true`。设为 `false` 时保留骨骼弹簧物理；需要网格布料的实例在创建时启用该选项。
 

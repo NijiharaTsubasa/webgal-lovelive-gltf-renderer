@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CharacterResourceOwner } from "./character-resource-owner.js";
 import { ResourceGLTFLoader } from "./resource-gltf-loader.js";
 import * as shaders from "./parameterized-renderer.js";
 import { MotionPlayer } from "./motion-player.js";
@@ -50,6 +51,7 @@ export class CharacterRenderer {
     this.behaviors = null;
     this.physics = null;
     this.parts = [];
+    this.modelResources = null;
     this.parameterRuntime = null;
     this.parameterAdapters = null;
     this.parameterPlayer = null;
@@ -246,6 +248,8 @@ export class CharacterRenderer {
     this.expressionName = "";
     this.shaderScope?.dispose();
     this.shaderScope = null;
+    this.modelResources?.dispose();
+    this.modelResources = null;
     if (this.root) this.scene.remove(this.root);
     this.root = null;
     this.config = null;
@@ -263,11 +267,13 @@ export class CharacterRenderer {
     }
     this.clear();
     const generation = this.generation;
+    const modelResources = new CharacterResourceOwner();
     const loadPromise = Promise.all(entries.map(async (entry) => {
       const basePath = `${packagesRoot}${entry.basePath.replace(/\/?$/, "/")}`;
       const modelUrl = URL.canParse(basePath)
         ? new URL(entry.component.model, basePath).href : `${basePath}${entry.component.model}`;
       const gltf = await this.loader.loadAsync(modelUrl);
+      modelResources.capture(gltf.scene);
       registerExpressionNodes(gltf);
       return { role: entry.component.role, component: entry.component, gltf,
         root: gltf.scene, nodesByName: indexNodesByName(gltf.scene) };
@@ -276,12 +282,13 @@ export class CharacterRenderer {
     try {
       parts = await loadPromise;
     } catch (error) {
+      modelResources.dispose();
       if (generation !== this.generation) return null;
       throw error;
     }
-    if (generation !== this.generation) return null;
+    if (generation !== this.generation) { modelResources.dispose(); return null; }
     const result = this.commitQueue.then(async () => {
-      if (generation !== this.generation) return null;
+      if (generation !== this.generation) { modelResources.dispose(); return null; }
       const body = integrated ? parts[0] : parts[1];
       const root = body.root;
       let composition;
@@ -326,6 +333,7 @@ export class CharacterRenderer {
         });
         const face = controllers.find((item) => item.role === "head" || item.role === "integrated")?.controller;
         this.root = root;
+        this.modelResources = modelResources;
         this.parts = parts;
         this.config = config;
         this.faceDefinition = faceDefinition;
@@ -366,6 +374,8 @@ export class CharacterRenderer {
           manager?.destroy();
           shaderScope?.dispose();
           if (this.shaderScope === shaderScope) this.shaderScope = null;
+          modelResources.dispose();
+          if (this.modelResources === modelResources) this.modelResources = null;
         }
       }
     });

@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { CharacterRenderSurface } from './character-render-surface.js';
+export { CharacterRenderSurface } from './character-render-surface.js';
 import { CharacterRenderer } from './character-renderer.js';
 import { HostResourceCatalog } from './host-resource-catalog.js';
 import { expandParameterManifest, ExpressionAdapterRegistry } from './garupa/manifest.js';
@@ -8,6 +10,8 @@ import { CharacterWarmPool } from './character-warm-pool.js';
 import { prepareSceneTextures, yieldPreparationTask } from './texture-preparation.js';
 
 const catalogs = new Map();
+const surfaceIdentities = new WeakMap();
+let nextSurfaceIdentity = 0;
 const warmed = new CharacterWarmPool({
   create: options => OffscreenCharacter.create(options),
   key: options => OffscreenCharacter.warmKey(options),
@@ -46,10 +50,11 @@ export class OffscreenCharacter {
     }));
   }
 
-  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing, motion = '', expression = '', meshClothEnabled = true }) {
+  static warmKey({ modelUrl, indexUrl, width = 768, height = 1024, framing, motion = '', expression = '', meshClothEnabled = true, surface }) {
     if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
+    if (surface && !surfaceIdentities.has(surface)) surfaceIdentities.set(surface, ++nextSurfaceIdentity);
     return JSON.stringify([new URL(modelUrl, globalThis.location?.href).href,
-      new URL(indexUrl, globalThis.location?.href).href, width, height, framing, motion, expression, meshClothEnabled]);
+      new URL(indexUrl, globalThis.location?.href).href, width, height, framing, motion, expression, meshClothEnabled, surface ? surfaceIdentities.get(surface) : null]);
   }
 
   static preload(options) { return warmed.preload(options); }
@@ -60,17 +65,17 @@ export class OffscreenCharacter {
 
   static async create(options) {
     const character = new OffscreenCharacter(options);
-    try { await character.load(options); return character; }
+    try { await character.load(options); if (character.disposed) throw new Error("Character loading was cancelled"); return character; }
     catch (error) { character.dispose(); throw error; }
   }
 
-  constructor({ width = 768, height = 1024 } = {}) {
-    this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, stencil: true });
-    this.renderer.debug.checkShaderErrors = import.meta.env?.DEV === true;
-    this.renderer.setSize(width, height, false);
-    this.renderer.setClearColor(0, 0);
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.canvas = this.renderer.domElement;
+  constructor({ width = 768, height = 1024, surface } = {}) {
+    this.ownsSurface = !surface;
+    this.surface = surface ?? new CharacterRenderSurface({ width, height });
+    this.surface.attach(this);
+    this.renderer = this.surface.renderer;
+    this.canvas = this.surface.canvas;
+    width = this.surface.width; height = this.surface.height;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(35, width / height, 0.01, 100);
     this.scene.add(new THREE.AmbientLight(new THREE.Color(0.02, 0.025, 0.03), 1));
@@ -90,18 +95,26 @@ export class OffscreenCharacter {
     if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
     this.character.meshClothEnabled = meshClothEnabled;
     this.catalog = resourceCatalog ?? await catalogFor(indexUrl);
+    if (this.disposed) return;
     const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior'].includes(item.type)).map(item => item.config));
     for (const config of dependencyConfigs) {
-      this.character.resourcePackages.register(await this.catalog.fetch(config), config);
+      const packageConfig = await this.catalog.fetch(config);
+      if (this.disposed) return;
+      this.character.resourcePackages.register(packageConfig, config);
     }
     const entry = await this.catalog.model(modelUrl);
+    if (this.disposed) return;
     this.modelUrl = entry.config;
     await this.catalog.preloadModelDependencies(entry);
+    if (this.disposed) return;
     await this.character.load([entry], '');
+    if (this.disposed) return;
     const parameterEntries = [];
     const configs = new Set(this.catalog.entries.filter(item => item.type.startsWith('garupa-')).map(item => item.config));
     for (const config of configs) {
-      parameterEntries.push(...expandParameterManifest(await this.catalog.fetch(config), config));
+      const manifest = await this.catalog.fetch(config);
+      if (this.disposed) return;
+      parameterEntries.push(...expandParameterManifest(manifest, config));
     }
     this.character.configureParameterPlayback({ runtime,
       adapters: new ExpressionAdapterRegistry(parameterEntries, '') });
@@ -115,6 +128,11 @@ export class OffscreenCharacter {
   // The host freezes this actor's ticker while preparing or attaching it.
   // Actual drawing realizes render targets, texture uploads and runtime passes.
   async prepare() {
+    if (this.surface) return this.surface.prepare(this, () => this.prepareFrameResources());
+    return this.prepareFrameResources();
+  }
+
+  async prepareFrameResources() {
     if (this.disposed) return;
     if (this.renderer.getContext?.().isContextLost()) throw new Error('Character WebGL context is lost');
     this.applyHostInputs();
@@ -200,6 +218,7 @@ export class OffscreenCharacter {
   update(delta) {
     if (this.disposed) return;
     if (!Number.isFinite(delta)) throw new Error('Character delta must be finite');
+    this.surface?.assertDrawable(this);
     const elapsed = Math.max(0, delta);
     this.blink.update(Math.min(elapsed, 0.1) * 1000);
     this.applyHostInputs();
@@ -212,8 +231,16 @@ export class OffscreenCharacter {
     this.disposed = true;
     try { this.character.dispose(); }
     finally {
-      try { this.renderer.dispose(); }
-      finally { this.renderer.forceContextLoss(); }
+      try { this.character.resourcePackages?.shaders?.dispose(); }
+      finally {
+        if (this.surface) {
+          this.surface.detach(this);
+          if (this.ownsSurface) this.surface.dispose();
+        } else {
+          try { this.renderer.dispose(); }
+          finally { this.renderer.forceContextLoss(); }
+        }
+      }
     }
   }
 }

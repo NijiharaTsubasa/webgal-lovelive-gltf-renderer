@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CharacterResourceOwner } from "./character-resource-owner.js";
 import { registerCompiledUniforms } from "./texture-preparation.js";
 import { applyRenderQueue } from "./render-order.js";
 import {
@@ -113,6 +114,12 @@ export class ShaderRegistry {
       return { ...pass, sections };
     });
     return { component: config, passes, samplers: config.samplers || [], scriptModule };
+  }
+
+  dispose() {
+    const textures = [...this.textures.values()];
+    this.textures.clear();
+    for (const pending of textures) Promise.resolve(pending).then(texture => texture.dispose(), () => {});
   }
 
   async loadTexture(name, uri) {
@@ -343,11 +350,13 @@ export function disposeShaderRuntimes(scope = defaultShaderScope) {
     for (const material of materials) material?.dispose?.();
   }
   scope.defaultPassObjects.length = 0;
+  scope.resources?.dispose();
+  if (!scope.disposed) scope.resources = new CharacterResourceOwner();
 }
 
 // Low-level preview hosts use the default scope. CharacterRenderer owns a
 // separate scope for each model load so unload and cancellation stay local.
-const defaultShaderScope = { renderer: null, registry: defaultShaderRegistry, runtimes: [], defaultPassObjects: [], disposed: false };
+const defaultShaderScope = { renderer: null, registry: defaultShaderRegistry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), disposed: false };
 export function setShaderRenderer(r) {
   installUnityColorMaskSupport(r);
   defaultShaderScope.renderer = r;
@@ -355,7 +364,7 @@ export function setShaderRenderer(r) {
 
 export function createShaderRuntimeScope(renderer, registry = defaultShaderRegistry) {
   installUnityColorMaskSupport(renderer);
-  const scope = { renderer, registry, runtimes: [], defaultPassObjects: [], disposed: false };
+  const scope = { renderer, registry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), disposed: false };
   return {
     applyCustomShaders: (gltf, root) => applyCustomShaders(gltf, root, renderer, scope),
     tick: (scene, camera) => tickShaderRuntimes(scene, camera, scope),
@@ -433,7 +442,11 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
     }
     if (!textureBindings.has(index)) {
       textureBindings.set(index, Promise.resolve(parser.getDependency("texture", index)).then(
-        (texture) => createGltfTextureBinding(texture, parser.json?.textures?.[index]),
+        (texture) => {
+          scope.resources?.add(texture);
+          return scope.resources?.add(createGltfTextureBinding(texture, parser.json?.textures?.[index]))
+            ?? createGltfTextureBinding(texture, parser.json?.textures?.[index]);
+        },
       ));
     }
     return textureBindings.get(index);
@@ -484,11 +497,17 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
             (uri) => scope.registry.loadTexture(shaderName, uri),
             `Shader ${shaderName} pass ${materialPass.id}`,
           );
+          for (const descriptor of shader.samplers) {
+            if (descriptor.type === "sampler2DArray" && Object.hasOwn(textures, descriptor.name)) {
+              scope.resources?.add(resolvedTextures[descriptor.name]);
+            }
+          }
           resolvedPasses.push({ materialPass, resolvedTextures });
         }
 
         if (scope.disposed) throw new Error("Shader runtime scope has been disposed");
         const firstClone = mat.clone();
+        scope.resources?.add(firstClone);
         const runtimes = instantiateShaderRuntime(firstClone, rendererInstance, shader, object, scope);
         let sourceResult = null;
         const registeredPasses = [];
@@ -502,6 +521,7 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
             runtimes,
             passIndex === 0 ? firstClone : undefined,
           );
+          scope.resources?.add(passMaterial);
           const result = realizeMaterialPass(
             object,
             shaderName,
