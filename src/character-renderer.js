@@ -14,6 +14,7 @@ import { IdlePose } from "./idle-pose.js";
 import { ParameterPlayer } from "./garupa/player.js";
 import { ParameterBodyPose } from "./garupa/body-pose.js";
 import bodyCalibration from "./garupa/body-calibration.js";
+import { CharacterFocus } from './character-focus.js';
 
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
 // resource catalog, clock and UI; none of those are assumed to be a preview page.
@@ -60,6 +61,9 @@ export class CharacterRenderer {
     this.parameterExpressionGeneration = 0;
     this.parameterFaceActive = false;
     this.shaderScope = null;
+    this.focus = new CharacterFocus();
+    this.focusAdapter = null;
+    this.focusAdapterGeneration = 0;
   }
 
   get faceCapabilities() { return this.face?.getCapabilities(); }
@@ -68,6 +72,21 @@ export class CharacterRenderer {
   configureParameterPlayback({ runtime, adapters }) {
     this.parameterRuntime = runtime;
     this.parameterAdapters = adapters;
+  }
+
+  setFocus(value) { this.focus.set(value); }
+
+  async initializeFocusAdapter() {
+    const generation = ++this.focusAdapterGeneration;
+    const root = this.root;
+    const factory = await this.parameterAdapters?.focusFactory?.(this.motionGroup);
+    if (generation !== this.focusAdapterGeneration || root !== this.root) return;
+    this.focusAdapter?.dispose();
+    this.focusAdapter = factory && root ? factory(this.expressionAdapterContext()) : null;
+  }
+
+  applyFocusEyes() {
+    if (!this.parameterFaceActive) this.focusAdapter?.apply(this.focus);
   }
 
   ensureParameterPlayer() {
@@ -96,6 +115,9 @@ export class CharacterRenderer {
       return false;
     }
     if (this.parameterFaceActive) return true;
+    // Adapter construction captures native geometry/TRS as its underlay.
+    // Release the gaze-only overlay before a new owner captures that state.
+    this.focusAdapter?.restore();
     const adapter = factory(this.expressionAdapterContext());
     if (!adapter) return false;
     const player = this.parameterPlayer;
@@ -229,6 +251,9 @@ export class CharacterRenderer {
     this.motionGeneration += 1;
     this.parameterFaceGeneration += 1;
     this.parameterExpressionGeneration += 1;
+    this.focusAdapterGeneration += 1;
+    this.focus.restore(); this.focus.targets = [];
+    this.focusAdapter?.dispose(); this.focusAdapter = null;
     if (rememberFace) this.rememberFace();
     this.setExternalExpressionDriver(null);
     this.parameterFaceActive = false;
@@ -338,6 +363,7 @@ export class CharacterRenderer {
         });
         const face = controllers.find((item) => item.role === "head" || item.role === "integrated")?.controller;
         this.root = root;
+        this.focus.bind(root);
         this.modelResources = modelResources;
         this.parts = parts;
         this.config = config;
@@ -474,11 +500,29 @@ export class CharacterRenderer {
 
   evaluatePose(step) {
     this.elapsedTime += step;
+    this.focusAdapter?.restore();
+    this.focus.restore();
+    this.focus.update(step);
     this.externalExpressionDriver?.beginFrame();
     for (const { controller } of this.expressionControllers) controller.beginFrame();
     this.behaviors?.beforeMotion(step, this.elapsedTime);
     const motionChange = this.applyPendingMotion();
     this.parameterPlayer?.update(step);
+    if (this.parameterPlayer && (this.parameterFaceActive || this.parameterBody)) {
+      const parameters = this.parameterPlayer.parameters;
+      this.parameterPlayer.parameters = { ...parameters,
+        ...(this.parameterFaceActive ? {
+          PARAM_EYE_BALL_X: THREE.MathUtils.clamp((parameters.PARAM_EYE_BALL_X ?? 0) + this.focus.x, -1, 1),
+          PARAM_EYE_BALL_Y: THREE.MathUtils.clamp((parameters.PARAM_EYE_BALL_Y ?? 0) + this.focus.y, -1, 1),
+        } : {}),
+        ...(this.parameterBody ? {
+          PARAM_ANGLE_X: (parameters.PARAM_ANGLE_X ?? 0) + 30 * this.focus.x,
+          PARAM_ANGLE_Y: (parameters.PARAM_ANGLE_Y ?? 0) + 30 * this.focus.y,
+          PARAM_ANGLE_Z: (parameters.PARAM_ANGLE_Z ?? 0) - 30 * this.focus.x * this.focus.y,
+          PARAM_BODY_ANGLE_X: (parameters.PARAM_BODY_ANGLE_X ?? 0) + 10 * this.focus.x,
+        } : {}),
+      };
+    }
     this.motion?.update(step);
     this.syncFaceActivity();
     if (this.parameterBody) this.parameterBody.applyParameters(this.parameterPlayer.parameters);
@@ -486,16 +530,20 @@ export class CharacterRenderer {
     for (const { controller } of this.expressionControllers) controller.update(step);
     this.behaviors?.afterMotion();
     this.externalExpressionDriver?.update(step);
+    if (!this.parameterBody) this.focus.apply();
     return motionChange;
   }
 
   update(delta) {
     let motionChange = null;
     const animate = step => { motionChange = this.evaluatePose(step) ?? motionChange; };
-    if (this.physics) this.physics.advance(delta, animate, () => this.behaviors?.afterPhysics());
+    if (this.physics) this.physics.advance(delta, animate, () => {
+      this.behaviors?.afterPhysics(); this.applyFocusEyes();
+    });
     else {
       animate(delta);
       this.behaviors?.afterPhysics();
+      this.applyFocusEyes();
     }
     return motionChange;
   }
@@ -507,6 +555,7 @@ export class CharacterRenderer {
     const change = this.evaluatePose(0);
     this.physics?.update(0);
     this.behaviors?.afterPhysics();
+    this.applyFocusEyes();
     this.physics?.syncPose();
     return change;
   }

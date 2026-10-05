@@ -30,6 +30,7 @@ export interface OffscreenCharacterOptions {
   /** Initial playback state, prepared at time zero before the instance is returned. */
   motion?: string;
   expression?: string;
+  focus?: { x?: number; y?: number; instant?: boolean };
   /** Stable identity of one anticipated appearance; distinct appearances use distinct IDs. */
   preloadId?: string;
   /** Fixed view height and vertical center in model world units (meters). */
@@ -43,6 +44,7 @@ export class OffscreenCharacter {
   static takePreloaded(options: OffscreenCharacterOptions): Promise<OffscreenCharacter | null>;
   canvas: HTMLCanvasElement;
   setMotion(name: string): Promise<void>;
+  setFocus(value: { x?: number; y?: number; instant?: boolean }): void;
   /** Native: 3d:<encoded eye>/<encoded closed>/<encoded open>; empty selects the model default. */
   setExpression(name: string): Promise<void>;
   /** Flush pending state and prepare rendering while the host freezes the actor's ticker. */

@@ -48,10 +48,14 @@ export class ExpressionAdapterRegistry {
     if (!this.modules.has(group)) {
       const promise = this.importModule(parameterResourceUrl(entry, this.packagesRoot)).then(module => {
         if (typeof module.createExpressionAdapter !== 'function') throw new Error(`${entry.name}: 缺少 createExpressionAdapter`);
-        return module.createExpressionAdapter;
+        return module;
       }).catch(error => { this.modules.delete(group); throw error; });
       this.modules.set(group, promise);
     }
-    return this.modules.get(group);
+    return (await this.modules.get(group)).createExpressionAdapter;
+  }
+  async focusFactory(group) {
+    await this.factory(group);
+    return (await this.modules.get(group))?.createFocusAdapter ?? null;
   }
 }

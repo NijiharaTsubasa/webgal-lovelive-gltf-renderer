@@ -95,7 +95,7 @@ export class OffscreenCharacter {
     this.motionGeneration = 0;
   }
 
-  async load({ modelUrl, indexUrl, resourceCatalog, runtime, framing, motion = '', expression = '', meshClothEnabled = true }) {
+  async load({ modelUrl, indexUrl, resourceCatalog, runtime, framing, motion = '', expression = '', meshClothEnabled = true, focus }) {
     if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
     this.character.meshClothEnabled = meshClothEnabled;
     this.catalog = resourceCatalog ?? await catalogFor(indexUrl);
@@ -122,6 +122,9 @@ export class OffscreenCharacter {
     }
     this.character.configureParameterPlayback({ runtime,
       adapters: new ExpressionAdapterRegistry(parameterEntries, '') });
+    await this.character.initializeFocusAdapter();
+    if (this.disposed) return;
+    if (focus) this.setFocus(focus);
     // Stable framing: never recalculate bounds as the actor moves.
     frameCharacterCamera(this.camera, this.character.root, framing, this.character.config.group);
     await this.setMotion(motion);
@@ -178,6 +181,8 @@ export class OffscreenCharacter {
     if (entry.type === 'motion') await this.character.selectMotion(entry, url);
     else await this.character.selectParameterMotion(entry, url);
   }
+
+  setFocus(value) { this.character.setFocus(value); }
 
   async setExpression(name) {
     const generation = ++this.expressionGeneration;
