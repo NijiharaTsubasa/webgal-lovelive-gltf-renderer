@@ -66,7 +66,7 @@ test("Behavior queries expose role-scoped definitions and atomically publish com
       OnDestroy(){observations.push(["destroy",context.getExpressionDefinition("head")]);}
     }}),
   });
-  const definition={morphPoses:[{name:"eye",targets:{face:{eye:1}}}],expressionGroups:[],expressions:[],defaultExpression:"preset"};
+  const definition={morphPoses:[{name:"eye",targets:{face:{eye:1}}}],expressionGroups:[],defaultExpression:{}};
   const head=part("head",{...definition,behaviors:[{name:"Query.Reader",required:true,parameters:{}}]});
   const manager=new BehaviorManager({registry,parts:[head,part("body")],humanoidScale:1,context:{}});
   await manager.initialize();

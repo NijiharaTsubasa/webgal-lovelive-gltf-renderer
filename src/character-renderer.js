@@ -160,16 +160,21 @@ export class CharacterRenderer {
     if (this.root) shaders.setParameterizedRenderingEnabled(this.root, this.shadersEnabled);
   }
 
-  setExpression(name) {
-    if (!name || !this.face?.setExpression(name)) return false;
-    this.expressionName = name;
+  setExpression(selection) {
+    if (!this.face) return false;
+    if (selection == null) {
+      selection = this.faceDefinition.defaultExpression;
+      if (!selection) {
+        selection = {};
+        for (const group of this.face.getCapabilities().groups) {
+          if (group.type === 'eye') selection.eye = group.states[0];
+          else selection.closed = selection.open = group.states[0];
+        }
+      }
+    }
+    this.face.setExpression(selection);
+    this.expressionName = this.face.getCapabilities().selections;
     return true;
-  }
-
-  setExpressionGroup(group, state) {
-    if (!this.face) return;
-    this.face.setGroup(group, state);
-    this.expressionName = "";
   }
 
   setBlink(value) { this.face?.setBlink(value); }
@@ -391,21 +396,20 @@ export class CharacterRenderer {
   initializeFace() {
     if (!this.face) return;
     const definition = this.faceDefinition;
-    const preset = definition.expressions.find((item) => item.name === definition.defaultExpression);
-    if (preset) this.setExpression(preset.name);
+    if (definition.defaultExpression) this.setExpression(definition.defaultExpression);
     if (!this.rememberedFace) return;
     const groups = this.face.getCapabilities().groups;
+    const next = { ...this.face.getCapabilities().selections };
     for (const group of groups) {
-      const previous = this.rememberedFace.selections[group.name];
-      if (group.states.includes(previous)) this.face.setGroup(group.name, previous, 0);
+      for (const slot of group.type === 'eye' ? ['eye'] : ['closed', 'open']) {
+        const previous = this.rememberedFace.selections[slot];
+        if (group.states.includes(previous)) next[slot] = previous;
+      }
     }
+    this.face.setExpression(next, 0);
     this.face.setBlink(this.rememberedFace.blink);
     this.face.setSpeech(this.rememberedFace.speech);
-    const previous = definition.expressions.find((item) => item.name === this.rememberedFace.expression);
-    const selections = this.face.getCapabilities().selections;
-    this.expressionName = previous && Object.entries(previous.selections).every(
-      ([group, state]) => selections[group] === state,
-    ) ? previous.name : "";
+    this.expressionName = this.face.getCapabilities().selections;
   }
 
   async selectMotion(entry, url) {

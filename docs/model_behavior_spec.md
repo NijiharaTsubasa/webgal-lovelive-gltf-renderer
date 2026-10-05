@@ -185,7 +185,7 @@ Behavior 可以修改自己参数所引用的模型节点，也可以创建由�
 原定义的可选性，不包含模型、材质或 Behavior 配置：
 
 ```js
-{ morphPoses, expressionGroups, expressions, defaultExpression }
+{ morphPoses, expressionGroups, defaultExpression }
 ```
 
 状态查询在首次求值前返回 `null`，此后返回：
@@ -193,8 +193,8 @@ Behavior 可以修改自己参数所引用的模型节点，也可以创建由�
 ```js
 {
   active: true,
-  expression: "Sad",                 // 最后选择的整体预设；单组或低层控制时为 null
-  selections: { eye: "Sad", mouth: "Sad" },
+  expression: { eye: "Sad", closed: "Smile", open: "A" }, // 低层控制时为 null
+  selections: { eye: "Sad", closed: "Smile", open: "A" },
   blink: 0.3,
   speech: 0,
   visemes: null,                      // null 使用 speech；对象表示口型输入（可为空）

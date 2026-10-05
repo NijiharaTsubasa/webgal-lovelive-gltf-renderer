@@ -16,7 +16,7 @@ test('bone settling and cloth contact recovery use independent reset budgets', (
   assert.deepEqual(budgets, [2, 2, 30]);
 });
 
-test('motion replacement shortens only initialized cloth recovery and preserves first settling', () => {
+test('motion replacement preserves initial settling and recovers initialized cloth with two steps', () => {
   const character = new CharacterRenderer({ renderer: {}, scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera() });
   const budgets = [];
   character.behaviors = { setMotion() {} };

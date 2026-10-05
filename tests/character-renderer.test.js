@@ -190,8 +190,8 @@ test("character runtime loads, advances, draws and releases independently of pre
     const component = { type: "model", name: "Character", role: "integrated", model: "model.glb",
       humanoidScale: 1,
       morphPoses: [{ name: "Smile", targets: { Face: { smile: 1 } } }],
-      expressionGroups: [{ name: "face", states: [{ name: "Smile", poses: { Smile: 0.4 } }] }],
-      expressions: [{ name: "Smile", selections: { face: "Smile" } }], defaultExpression: "Smile" };
+      expressionGroups: [{ name: "face", type: "eye", states: [{ name: "Smile", poses: { Smile: 0.4 } }] }],
+      defaultExpression: { eye: "Smile" } };
     const loaded = await runtime.load([{ name: "Character", basePath: "fixture", component }], "/packages/");
     const attached = loaded.root === runtime.root && scene.children.includes(runtime.root);
     runtime.setPhysicsEnabled(false);
@@ -250,7 +250,7 @@ test("character runtime loads, advances, draws and releases independently of pre
     runtime.update(0.5);
     const mixedProgress = face.morphTargetInfluences[0] === 0.8 && Math.abs(groupUnderlay - 0.5) < 1e-6;
     runtime.setExternalExpressionDriver(null);
-    runtime.face.setExpression("Smile", 0);
+    runtime.face.setExpression({ eye: "Smile" }, 0);
     runtime.update(0);
     const actionFaceOwns = face.morphTargetInfluences[0] === 0.5
       && !runtime.face.active && runtime.motion !== null;
@@ -265,7 +265,7 @@ test("character runtime loads, advances, draws and releases independently of pre
     const propKeepsNative = runtime.face.active && face.morphTargetInfluences[0] === 0.4;
     await runtime.selectMotion(null);
     runtime.update(0);
-    runtime.face.setExpression("Smile", 0);
+    runtime.face.setExpression({ eye: "Smile" }, 0);
     const observations = [];
     runtime.behaviors.records.push({ fullName: "Fixture.Face", instance: {
       LateUpdate() {
@@ -331,11 +331,26 @@ test("character runtime loads, advances, draws and releases independently of pre
     await runtime.load([{ name: "Character", basePath: "fixture", component }], "/packages/");
     const modelChanged = runtime.externalExpressionDriver === null && replacementDisposed === 1
       && runtime.face.active && runtime.root.getObjectByName("Face") !== face;
+    const options = structuredClone(component);
+    options.expressionGroups[0].states.push({name:"Other",poses:{Smile:.2}});
+    await runtime.load([{name:"Character",basePath:"fixture",component:options}],"/packages/");
+    runtime.setExpression({eye:"Other"});runtime.setBlink(.3);runtime.setSpeech(.6);runtime.update(.3);
+    runtime.setExpression();runtime.update(.3);
+    const declaredDefault = runtime.face.getCapabilities().selections.eye === "Smile"
+      && runtime.face.blink === .3 && runtime.face.speech === .6;
+    delete options.defaultExpression;
+    await runtime.load([{name:"Character",basePath:"fixture",component:options}],"/packages/");
+    runtime.setExpression({eye:"Other"});runtime.update(.3);
+    const selectedOther = runtime.face.getCapabilities().selections.eye === "Other";
+    runtime.setExpression();runtime.update(.3);
+    const implicitDefault = selectedOther && runtime.face.getCapabilities().selections.eye === "Smile"
+      && runtime.face.blink === .3 && runtime.face.speech === .6
+      && Math.abs(runtime.root.getObjectByName("Face").morphTargetInfluences[0] - .4) < 1e-12;
     runtime.dispose();
     const cleared = runtime.externalExpressionDriver === null && disposed === 4
       && face.visible && face.position.x === 2;
     renderer.dispose();
-    return { attached, draws, culling, started, stopped,
+    return { attached, draws, culling, started, stopped,defaults:{declaredDefault,implicitDefault},
       ownership: { mixedInitial, mixedProgress, actionFaceOwns, nativeRestoredAfterMotion, propKeepsNative,
         native, external, captured: captured.slice(0, 2), motionUnderlays: motionUnderlays.slice(0, 2),
         released, resumed, observations, restoredInactive, suspended, restoredRequested,
@@ -345,6 +360,7 @@ test("character runtime loads, advances, draws and releases independently of pre
   assert.deepEqual(result, { attached: true, draws: 4,
     culling: { cameraSamples: [true, true, true], staticPart: true },
     started: true, stopped: true,
+    defaults:{declaredDefault:true,implicitDefault:true},
     ownership: {
       mixedInitial: true, mixedProgress: true, actionFaceOwns: true,
       nativeRestoredAfterMotion: true, propKeepsNative: true,

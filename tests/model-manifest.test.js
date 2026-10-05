@@ -17,7 +17,6 @@ function composedManifest() {
         model: "head.glb",
         morphPoses: [],
         expressionGroups: [],
-        expressions: [],
         humanoidScale: 1.52,
       },
       {
@@ -62,7 +61,6 @@ test("integrated model may omit group and ignores unknown additive fields", () =
       model: "model.glb",
       morphPoses: [],
         expressionGroups: [],
-        expressions: [],
       humanoidScale: 0.9,
       futureRenderingHint: "supported",
     }],
@@ -84,7 +82,6 @@ test("manifest rejects duplicate roles and mixed integrated layouts", () => {
     model: "model.glb",
     morphPoses: [],
         expressionGroups: [],
-        expressions: [],
     humanoidScale: 1,
   });
   assert.throws(() => validateModelManifest(mixed), /integrated 不能与 head 或 body 共存/);
@@ -92,7 +89,7 @@ test("manifest rejects duplicate roles and mixed integrated layouts", () => {
 
 test("body omits facial fields and composed manifests require group", () => {
   const facialBody = composedManifest();
-  facialBody.components[1].expressions = [];
+  facialBody.components[1].expressionGroups = [];
   assert.throws(() => validateModelManifest(facialBody), /body 不应声明表情字段/);
 
   const missingGroup = composedManifest();
@@ -120,16 +117,19 @@ test("legacy flat configs are not accepted", () => {
   }), /顶层只能包含 components/);
 });
 
-test("defaultExpression must reference an existing expression", () => {
+test("defaultExpression references existing eye and both mouth states", () => {
   const manifest = composedManifest();
-  manifest.components[0].expressions = [{ name: "Neutral", selections: {} }];
-  manifest.components[0].defaultExpression = "Neutral";
+  manifest.components[0].expressionGroups = [
+    {name:"face",type:"eye",states:[{name:"Neutral",poses:{}}]},
+    {name:"lips",type:"mouth",states:[{name:"N",poses:{}},{name:"A",poses:{}}]},
+  ];
+  manifest.components[0].defaultExpression = {eye:"Neutral",closed:"N",open:"A"};
   assert.equal(validateModelManifest(manifest), manifest);
 
-  manifest.components[0].defaultExpression = "Missing";
+  manifest.components[0].defaultExpression.open = "Missing";
   assert.throws(
     () => validateModelManifest(manifest),
-    /defaultExpression 必须引用 expressions 中已有的名称/,
+    /defaultExpression.open 必须引用 mouth 状态/,
   );
 });
 
@@ -173,20 +173,20 @@ test("optional idlePose keeps zero-muscle bones as the action reference", () => 
   assert.throws(() => validateModelManifest(manifest), /defaultMotion/);
 });
 
-test("expression recipe references, states and complete presets are validated", () => {
+test("expression recipe references, states and complete default combinations are validated", () => {
   const manifest = composedManifest();
   const face = manifest.components[0];
   face.morphPoses = [{name:"eye",targets:{Face:{close:-0.5}}}];
-  face.expressionGroups = [{name:"face",states:[{name:"Joy",poses:{eye:2},controls:{blink:{eye:0},speech:{},visemes:{a:{}}}}]}];
-  face.expressions = [{name:"Joy",selections:{face:"Joy"},futureHint:true}];
+  face.expressionGroups = [{name:"face",type:"eye",states:[{name:"Joy",poses:{eye:2},controls:{blink:{eye:0}}}]}];
+  face.defaultExpression={eye:"Joy"};
   assert.equal(validateModelManifest(manifest),manifest);
   face.expressionGroups[0].states[0].poses.unknown=1;
   assert.throws(()=>validateModelManifest(manifest),/未知 Morph 配方/);
   delete face.expressionGroups[0].states[0].poses.unknown;
-  face.expressions[0].selections={};
-  assert.throws(()=>validateModelManifest(manifest),/完整选择/);
-  face.expressions[0].selections={face:"Missing"};
-  assert.throws(()=>validateModelManifest(manifest),/未知分组或状态/);
+  face.defaultExpression={};
+  assert.throws(()=>validateModelManifest(manifest),/defaultExpression.eye/);
+  face.defaultExpression={eye:"Missing"};
+  assert.throws(()=>validateModelManifest(manifest),/defaultExpression.eye/);
 });
 test("finite unbounded Morph and recipe values are allowed without field whitelist",()=>{
   const manifest=composedManifest();
@@ -207,9 +207,9 @@ test("required arrays, nonempty states and duplicate names are rejected",()=>{
   delete face.morphPoses;
   assert.throws(()=>validateModelManifest(manifest),/morphPoses/);
   face.morphPoses=[];
-  face.expressionGroups=[{name:"face",states:[]}];
+  face.expressionGroups=[{name:"face",type:"eye",states:[]}];
   assert.throws(()=>validateModelManifest(manifest),/states/);
-  face.expressionGroups=[{name:"face",states:[{name:"same",poses:{}},{name:"same",poses:{}}]}];
+  face.expressionGroups=[{name:"face",type:"eye",states:[{name:"same",poses:{}},{name:"same",poses:{}}]}];
   assert.throws(()=>validateModelManifest(manifest),/重复名称/);
 });
 test("control independence compares expanded Morph deltas, not recipe names",()=>{
@@ -219,9 +219,12 @@ test("control independence compares expanded Morph deltas, not recipe names",()=
     {name:"left",targets:{Face:{eye:1}}},
     {name:"other",targets:{Face:{eye:2}}},
   ];
-  face.expressionGroups=[{name:"face",states:[{name:"N",poses:{},controls:{blink:{left:1},speech:{other:1}}}]}];
+  face.expressionGroups=[
+    {name:"face",type:"eye",states:[{name:"N",poses:{},controls:{blink:{left:1}}}]},
+    {name:"mouth",type:"mouth",states:[{name:"N",poses:{}},{name:"A",poses:{other:1}}]},
+  ];
   assert.throws(()=>validateModelManifest(manifest),/同一实际 Morph/);
-  face.expressionGroups[0].states[0].poses.other=1;
+  face.expressionGroups[1].states[0].poses.other=1;
   assert.equal(validateModelManifest(manifest),manifest);
 });
 

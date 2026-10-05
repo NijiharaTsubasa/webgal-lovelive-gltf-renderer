@@ -18,7 +18,7 @@
   "components": [
     {
       "type": "model", "name": "character", "role": "integrated", "model": "model.glb",
-      "morphPoses": [], "expressionGroups": [], "expressions": [], "humanoidScale": 1
+      "morphPoses": [], "expressionGroups": [], "humanoidScale": 1
     },
     {
       "type": "shader", "name": "toon", "src": "shaders/toon.glsl",

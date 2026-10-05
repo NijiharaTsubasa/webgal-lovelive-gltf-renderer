@@ -95,17 +95,38 @@ export class ExpressionController {
     }
     this.groups = new Map(definition.expressionGroups.map((group) => [group.name,
       new Map(group.states.map((state) => [state.name, state]))]));
-    this.presets = new Map(definition.expressions.map((preset) => [preset.name, preset.selections]));
+    this.groupsByType = new Map(definition.expressionGroups.map(group => [group.type, this.groups.get(group.name)]));
     this.validVisemes = new Set();
     for (const [groupName, states] of this.groups) {
       for (const state of states.values()) {
         const controls = state.controls || {};
         for (const name of Object.keys(controls.visemes || {})) this.validVisemes.add(name);
         const blink = this.expandWeights(this.endpointDelta(state.poses, controls.blink));
-        for (const endpoint of [controls.speech, ...Object.values(controls.visemes || {})]) {
+        for (const endpoint of Object.values(controls.visemes || {})) {
           const mouth = this.expandWeights(this.endpointDelta(state.poses, endpoint));
           for (const [key, value] of blink) {
             if (value !== 0 && (mouth.get(key) || 0) !== 0) throw new Error(`blink 与嘴部控制改变同一实际 Morph: ${groupName}/${state.name}`);
+          }
+        }
+      }
+    }
+    const eyeStates = this.groupsByType.get("eye");
+    const mouthStates = this.groupsByType.get("mouth");
+    if (eyeStates && mouthStates) {
+      const base = mouthStates.values().next().value.poses;
+      const mouthChanges = [];
+      for (const state of mouthStates.values()) {
+        for (const target of [state.poses, ...Object.values(state.controls?.visemes ?? {})]) {
+          const endpoint = Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(target)])]
+            .map(name => [name, target[name] ?? 0]));
+          mouthChanges.push(this.expandWeights(this.endpointDelta(base, endpoint)));
+        }
+      }
+      for (const state of eyeStates.values()) {
+        const blink = this.expandWeights(this.endpointDelta(state.poses, state.controls?.blink));
+        for (const mouth of mouthChanges) {
+          for (const [key, value] of blink) {
+            if (value !== 0 && (mouth.get(key) ?? 0) !== 0) throw new Error("blink 与嘴部控制改变同一实际 Morph");
           }
         }
       }
@@ -148,19 +169,16 @@ export class ExpressionController {
     const from = this.renderedWeights === null ? this.evaluateWeights() : this.renderedWeights;
     this.transition = duration === 0 || !this.active ? null : { from: new Map(from), elapsed: 0, duration };
   }
-  setExpression(name, duration = DEFAULT_TRANSITION_SECONDS) {
-    if (!this.presets.has(name)) throw new Error(`未知表情 ${name}`);
+  setExpression(selection, duration = DEFAULT_TRANSITION_SECONDS) {
+    object(selection, "表情组合");
+    for (const [key, type] of [["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
+      const states = this.groupsByType.get(type);
+      if (states && !states.has(selection[key])) throw new Error(`未知 ${key} 状态 ${selection[key]}`);
+      if (!states && selection[key] !== undefined) throw new Error(`${key} 没有对应分组`);
+    }
     this.startTransition(duration);
-    this.selections = new Map(Object.entries(this.presets.get(name)));
-    this.expression = name;
-    this.rawWeights = null;
-    return true;
-  }
-  setGroup(group, state, duration = DEFAULT_TRANSITION_SECONDS) {
-    if (!this.groups.get(group)?.has(state)) throw new Error(`未知分组或状态 ${group}/${state}`);
-    this.startTransition(duration);
-    this.selections.set(group, state);
-    this.expression = null;
+    this.selections = new Map(Object.entries(selection));
+    this.expression = { ...selection };
     this.rawWeights = null;
     return true;
   }
@@ -197,29 +215,33 @@ export class ExpressionController {
   reset() {
     this.transition = null;
     this.renderedWeights = null;
-    this.selections = new Map([...this.groups].map(([name, states]) => [name, states.keys().next().value]));
+    const selection = {};
+    for (const [type, states] of this.groupsByType) {
+      if (type === "eye") selection.eye = states.keys().next().value;
+      else selection.closed = selection.open = states.keys().next().value;
+    }
+    this.selections = new Map(Object.entries(selection));
     this.expression = null;
     this.rawWeights = null;
     this.blink = 0;
     this.speech = 0;
     this.visemes = null;
-    if (this.definition.defaultExpression !== undefined) this.setExpression(this.definition.defaultExpression, 0);
+    this.setExpression(this.definition.defaultExpression ?? selection, 0);
     return true;
   }
   getCapabilities() {
     let blink = false;
     let speech = false;
     const visemes = new Set();
-    for (const [group, state] of this.selections) {
-      const controls = this.groups.get(group).get(state).controls || {};
-      blink ||= controls.blink !== undefined;
-      speech ||= controls.speech !== undefined;
-      for (const name of Object.keys(controls.visemes || {})) visemes.add(name);
-    }
+    const eye = this.groupsByType.get("eye")?.get(this.selections.get("eye"));
+    const mouth = this.groupsByType.get("mouth")?.get(this.selections.get("open"));
+    blink = eye?.controls?.blink !== undefined;
+    speech = this.groupsByType.has("mouth");
+    for (const name of Object.keys(mouth?.controls?.visemes || {})) visemes.add(name);
     return {
       blink, speech, visemes: [...visemes].sort(), validVisemes: [...this.validVisemes].sort(),
-      groups: [...this.groups].map(([name, states]) => ({ name, states: [...states.keys()] })),
-      selections: Object.fromEntries(this.selections), expressions: [...this.presets.keys()],
+      groups: this.definition.expressionGroups.map(({name, type}) => ({name, type, states: [...this.groups.get(name).keys()]})),
+      selections: Object.fromEntries(this.selections),
     };
   }
   setActive(active) {
@@ -237,16 +259,29 @@ export class ExpressionController {
   evaluateWeights() {
     if (this.rawWeights !== null) return new Map(this.rawWeights);
     const weights = new Map();
-    for (const [group, selected] of [...this.selections].sort(([a], [b]) => a.localeCompare(b))) {
-      const state = this.groups.get(group).get(selected);
-      for (const name of Object.keys(state.poses).sort()) add(weights, name, state.poses[name]);
-      const controls = state.controls || {};
-      const contribute = (endpoint, amount) => {
-        for (const [name, delta] of this.endpointDelta(state.poses, endpoint)) add(weights, name, amount * delta);
-      };
-      contribute(controls.blink, this.blink);
-      if (this.visemes === null) contribute(controls.speech, this.speech);
-      else for (const name of Object.keys(this.visemes).sort()) contribute(controls.visemes?.[name], this.visemes[name]);
+    const contribute = (poses, amount) => {
+      for (const name of Object.keys(poses || {}).sort()) add(weights, name, poses[name] * amount);
+    };
+    const eye = this.groupsByType.get("eye")?.get(this.selections.get("eye"));
+    if (eye) {
+      contribute(eye.poses, 1);
+      for (const [name, delta] of this.endpointDelta(eye.poses, eye.controls?.blink)) add(weights, name, delta * this.blink);
+    }
+    const mouthStates = this.groupsByType.get("mouth");
+    if (mouthStates) {
+      const closed = mouthStates.get(this.selections.get("closed"));
+      const open = mouthStates.get(this.selections.get("open"));
+      if (this.visemes === null) {
+        contribute(closed.poses, 1 - this.speech);
+        contribute(open.poses, this.speech);
+      } else {
+        let remaining = 1;
+        for (const [name, amount] of Object.entries(this.visemes)) {
+          const endpoint = open.controls?.visemes?.[name];
+          if (endpoint) { contribute(endpoint, amount); remaining -= amount; }
+        }
+        contribute(closed.poses, remaining);
+      }
     }
     return weights;
   }

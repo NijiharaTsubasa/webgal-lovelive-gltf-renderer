@@ -68,15 +68,19 @@ export function validateExpressionDefinitions(definition, source = "expressions"
   };
   const groups = namedEntries(definition.expressionGroups, `${source}.expressionGroups`);
   const stateNames = new Map();
+  const types = new Map();
   for (const group of groups.values()) {
+    if (!["eye", "mouth"].includes(group.type)) fail(source, "表情分组 type 必须是 eye 或 mouth");
+    if (types.has(group.type)) fail(source, `重复表情用途 ${group.type}`);
     const states = namedEntries(group.states, `${source}.${group.name}.states`, true);
+    types.set(group.type, states);
     stateNames.set(group.name, states);
     for (const state of states.values()) {
       const label = `${source}.${group.name}.${state.name}`;
       weights(state.poses, `${label}.poses`);
       if (state.controls === undefined) continue;
       if (!isObject(state.controls)) fail(label, "controls 必须是对象");
-      for (const key of ["blink", "speech"]) {
+      for (const key of ["blink"]) {
         if (state.controls[key] !== undefined) weights(state.controls[key], `${label}.${key}`);
       }
       if (state.controls.visemes !== undefined) {
@@ -87,7 +91,7 @@ export function validateExpressionDefinitions(definition, source = "expressions"
         }
       }
       const blink = changedMorphs(state.poses, state.controls.blink, label);
-      for (const endpoint of [state.controls.speech, ...Object.values(state.controls.visemes || {})]) {
+      for (const endpoint of Object.values(state.controls.visemes || {})) {
         const mouth = changedMorphs(state.poses, endpoint, label);
         for (const [key, value] of blink) {
           if (value !== 0 && (mouth.get(key) || 0) !== 0) fail(label, "blink 与嘴部控制不能改变同一实际 Morph");
@@ -95,16 +99,35 @@ export function validateExpressionDefinitions(definition, source = "expressions"
       }
     }
   }
-  const presets = namedEntries(definition.expressions, `${source}.expressions`);
-  for (const preset of presets.values()) {
-    if (!isObject(preset.selections)) fail(source, "selections 必须是对象");
-    if (Object.keys(preset.selections).length !== groups.size) fail(source, "selections 必须完整选择全部分组");
-    for (const [group, state] of Object.entries(preset.selections)) {
-      if (!stateNames.get(group)?.has(state)) fail(source, `未知分组或状态 ${group}/${state}`);
+  const eyeStates = types.get("eye");
+  const mouthStates = types.get("mouth");
+  if (eyeStates && mouthStates) {
+    const base = mouthStates.values().next().value.poses;
+    const fullEndpoint = (target) => Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(target)])]
+      .map(name => [name, target[name] ?? 0]));
+    const mouthChanges = [];
+    for (const state of mouthStates.values()) {
+      for (const target of [state.poses, ...Object.values(state.controls?.visemes ?? {})]) {
+        mouthChanges.push(changedMorphs(base, fullEndpoint(target), source));
+      }
+    }
+    for (const state of eyeStates.values()) {
+      const blink = changedMorphs(state.poses, state.controls?.blink, source);
+      for (const mouth of mouthChanges) {
+        for (const [key, value] of blink) {
+          if (value !== 0 && (mouth.get(key) ?? 0) !== 0) fail(source, "blink 与嘴部控制不能改变同一实际 Morph");
+        }
+      }
     }
   }
-  if (definition.defaultExpression !== undefined && !presets.has(definition.defaultExpression)) {
-    fail(source, "defaultExpression 必须引用 expressions 中已有的名称");
+  if (definition.defaultExpression !== undefined) {
+    if (!isObject(definition.defaultExpression)) fail(source, "defaultExpression 必须是组合对象");
+    for (const [key, type] of [["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
+      if (types.has(type) && !types.get(type).has(definition.defaultExpression[key])) {
+        fail(source, `defaultExpression.${key} 必须引用 ${type} 状态`);
+      }
+      if (!types.has(type) && definition.defaultExpression[key] !== undefined) fail(source, `${key} 没有对应分组`);
+    }
   }
 }
 
@@ -166,17 +189,9 @@ export function validateModelManifest(config, source = "config.json") {
 
     if (component.role === "head" || component.role === "integrated") {
       validateExpressionDefinitions(component, componentSource);
-      if (component.defaultExpression !== undefined) {
-        if (typeof component.defaultExpression !== "string" || !component.defaultExpression.trim()) {
-          fail(componentSource, "defaultExpression 必须是非空字符串");
-        }
-        if (!component.expressions.some((item) => item?.name === component.defaultExpression)) {
-          fail(componentSource, "defaultExpression 必须引用 expressions 中已有的名称");
-        }
-      }
     }
     if (component.role === "body"
-        && ["morphPoses", "expressionGroups", "expressions", "defaultExpression"].some((key) => key in component)) {
+        && ["morphPoses", "expressionGroups", "defaultExpression"].some((key) => key in component)) {
       fail(componentSource, "body 不应声明表情字段");
     }
     if (component.role !== "integrated"

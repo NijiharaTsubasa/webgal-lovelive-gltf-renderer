@@ -43,6 +43,7 @@ export class OffscreenCharacter {
   static takePreloaded(options: OffscreenCharacterOptions): Promise<OffscreenCharacter | null>;
   canvas: HTMLCanvasElement;
   setMotion(name: string): Promise<void>;
+  /** Native: 3d:<encoded eye>/<encoded closed>/<encoded open>; empty selects the model default. */
   setExpression(name: string): Promise<void>;
   /** Flush pending state and prepare rendering while the host freezes the actor's ticker. */
   prepare(): Promise<void>;

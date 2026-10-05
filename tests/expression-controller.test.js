@@ -25,22 +25,22 @@ function definition() {
   return {
     morphPoses: ["joy", "close", "sad", "a", "i"].map((name) => ({name, targets:{face:{[name]:1}}})),
     expressionGroups: [
-      {name:"face",states:[
+      {name:"face",type:"eye",states:[
         {name:"Joy",poses:{joy:1},controls:{blink:{joy:0,close:1}}},
         {name:"Fixed",poses:{close:1}},
       ]},
-      {name:"mouth",states:[
-        {name:"Sad",poses:{sad:1},controls:{speech:{a:1},visemes:{a:{a:1},i:{sad:0,i:1}}}},
-        {name:"Neutral",poses:{},controls:{speech:{a:0.8},visemes:{a:{a:0.8}}}},
+      {name:"mouth",type:"mouth",states:[
+        {name:"Sad",poses:{sad:1}},
+        {name:"Neutral",poses:{}},
+        {name:"A",poses:{a:1},controls:{visemes:{a:{a:1},i:{i:1}}}},
+        {name:"SoftA",poses:{a:.8},controls:{visemes:{a:{a:.8}}}},
       ]},
     ],
-    expressions:[
-      {name:"Sad",selections:{face:"Joy",mouth:"Sad"}},
-      {name:"Fixed",selections:{face:"Fixed",mouth:"Neutral"}},
-    ],
-    defaultExpression:"Sad",
+    defaultExpression:{eye:"Joy",closed:"Sad",open:"A"},
   };
 }
+const SAD={eye:"Joy",closed:"Sad",open:"A"};
+const FIXED={eye:"Fixed",closed:"Neutral",open:"SoftA"};
 function close(actual, expected) {
   actual.forEach((value, index) => assert.ok(Math.abs(value-expected[index])<1e-12, `${index}: ${value} != ${expected[index]}`));
 }
@@ -52,13 +52,13 @@ test("expression query publishes immutable evaluated recipes, not mutable input 
   assert.equal(c.getState(),null);
   c.setBlink(.25);c.setSpeech(.6);c.setParameter("independent",.4);c.update();
   const first=c.getState();
-  assert.deepEqual(first.poseWeights,{joy:.75,close:.25,sad:1,a:.6});
-  assert.equal(first.expression,"Sad");
+  assert.deepEqual(first.poseWeights,{joy:.75,close:.25,sad:.4,a:.6});
+  assert.deepEqual(first.expression,SAD);
   assert.deepEqual(first.parameters,{independent:.4});
   assert.throws(()=>{first.poseWeights.joy=9;},TypeError);
-  c.setGroup("face","Fixed",0); c.setSpeech(.9);
+  c.setExpression({...SAD,eye:"Fixed"},0); c.setSpeech(.9);
   assert.equal(c.getState(),first);
-  c.update();assert.equal(c.getState().expression,null);
+  c.update();assert.deepEqual(c.getState().expression,{...SAD,eye:"Fixed"});
   assert.equal(first.speech,.6);
   c.setMorphPoseWeights({sad:-.25,a:2});c.update();
   assert.equal(c.getState().expression,null);
@@ -93,7 +93,7 @@ test("composed components keep distinct expression queries after their nodes mov
     registerExpressionNodes(gltf);return {gltf,face};
   };
   const head=makeGltf(headRoot),body=makeGltf(bodyRoot);
-  const def={morphPoses:[{name:"amount",targets:{face:{amount:1}}}],expressionGroups:[],expressions:[]};
+  const def={morphPoses:[{name:"amount",targets:{face:{amount:1}}}],expressionGroups:[]};
   const parts=[{role:"head",root:headRoot,gltf:head.gltf,component:def},{role:"body",root:bodyRoot,gltf:body.gltf,component:def}];
   // This is the same root move performed by skeleton composition. Names now
   // collide across components, but original loader associations stay distinct.
@@ -121,56 +121,56 @@ test("sparse endpoints inherit base while explicit zero removes it", () => {
   const {root,face}=fixture();
   const c=new ExpressionController(root,definition());
   c.setBlink(0.25);c.setSpeech(0.63);c.update();
-  close(face.morphTargetInfluences,[0.75,0.25,1,0.63,0,0.6]);
+  close(face.morphTargetInfluences,[0.75,0.25,.37,0.63,0,0.6]);
   c.setVisemes({a:0.4,i:0.2});c.update();
-  close(face.morphTargetInfluences,[0.75,0.25,0.8,0.4,0.2,0.6]);
+  close(face.morphTargetInfluences,[0.75,0.25,0.4,0.4,0.2,0.6]);
   c.setVisemes({i:0.2,a:0.4});c.update();
-  close(face.morphTargetInfluences,[0.75,0.25,0.8,0.4,0.2,0.6]);
+  close(face.morphTargetInfluences,[0.75,0.25,0.4,0.4,0.2,0.6]);
   c.setVisemes(null);c.update();
-  close(face.morphTargetInfluences,[0.75,0.25,1,0.63,0,0.6]);
+  close(face.morphTargetInfluences,[0.75,0.25,.37,0.63,0,0.6]);
 });
-test("switching presets and groups preserves inputs but never stale Morphs",()=>{
+test("switching combinations preserves inputs but never stale Morphs",()=>{
   const {root,face}=fixture();const c=new ExpressionController(root,definition());
-  c.setBlink(0.5);c.setVisemes({a:0.4,i:0.2});c.setExpression("Fixed",0);c.update();
+  c.setBlink(0.5);c.setVisemes({a:0.4,i:0.2});c.setExpression(FIXED,0);c.update();
   close(face.morphTargetInfluences,[0,1,0,0.32,0,0.6]);
   assert.deepEqual(c.visemes,{a:0.4,i:0.2});
   assert.deepEqual(c.getCapabilities().visemes,["a"]);
   assert.deepEqual(c.getCapabilities().validVisemes,["a","i"]);
-  c.setGroup("mouth","Sad",0);c.update();
-  close(face.morphTargetInfluences,[0,1,0.8,0.4,0.2,0.6]);
-  c.setExpression("Sad",0);c.update();
-  close(face.morphTargetInfluences,[0.5,0.5,0.8,0.4,0.2,0.6]);
+  c.setExpression({...SAD,eye:"Fixed"},0);c.update();
+  close(face.morphTargetInfluences,[0,1,0.4,0.4,0.2,0.6]);
+  c.setExpression(SAD,0);c.update();
+  close(face.morphTargetInfluences,[0.5,0.5,0.4,0.4,0.2,0.6]);
   c.reset();c.update();close(face.morphTargetInfluences,[1,0,1,0,0,0.6]);
 });
-test("preset and group transitions blend rendered recipes and Behavior snapshots",()=>{
+test("combination transitions blend rendered recipes and Behavior snapshots",()=>{
   const {root,face}=fixture();const c=new ExpressionController(root,definition());
   c.update();
-  c.setExpression("Fixed");
+  c.setExpression(FIXED);
   assert.ok(c.transition?.duration>0);
   c.update(c.transition.duration/2);
   close(face.morphTargetInfluences,[.5,.5,.5,0,0,.6]);
   assert.deepEqual(c.getState().poseWeights,{joy:.5,close:.5,sad:.5,a:0});
-  c.setGroup("mouth","Sad",.4);
+  c.setExpression({...SAD,eye:"Fixed"},.4);
   c.update(.2);
   close(face.morphTargetInfluences,[.25,.75,.75,0,0,.6]);
   assert.deepEqual(c.getState().poseWeights,{joy:.25,close:.75,sad:.75,a:0});
   c.update(.2);
   close(face.morphTargetInfluences,[0,1,1,0,0,.6]);
-  c.setExpression("Sad",0);c.update(0);
+  c.setExpression(SAD,0);c.update(0);
   close(face.morphTargetInfluences,[1,0,1,0,0,.6]);
   assert.equal(c.transition,null);
 });
 test("transition preserves blink and speech input and rejects invalid durations",()=>{
   const {root,face}=fixture();const c=new ExpressionController(root,definition());
   c.update();c.setBlink(.2);c.setSpeech(.4);
-  c.setExpression("Fixed",.2);c.update(.1);
+  c.setExpression(FIXED,.2);c.update(.1);
   close(face.morphTargetInfluences,[.5,.5,.5,.16,0,.6]);
   assert.deepEqual(c.getState().poseWeights,{joy:.5,close:.5,sad:.5,a:.16000000000000003});
   c.update(.1);
   close(face.morphTargetInfluences,[0,1,0,.32,0,.6]);
   for(const duration of [-1,NaN,Infinity,"0.2",null]) {
-    assert.throws(()=>c.setExpression("Sad",duration));
-    assert.throws(()=>c.setGroup("mouth","Sad",duration));
+    assert.throws(()=>c.setExpression(SAD,duration));
+    assert.throws(()=>c.setExpression(FIXED,duration));
   }
 });
 test("raw mixing is exclusive, additive, unnormalized and unclamped",()=>{
@@ -179,7 +179,7 @@ test("raw mixing is exclusive, additive, unnormalized and unclamped",()=>{
   const c=new ExpressionController(root,d);
   c.setMorphPoseWeights({double:2,a:-0.5});c.setBlink(1);c.setSpeech(1);c.update();
   close(face.morphTargetInfluences,[0,0,-2,3.5,0,0.6]);
-  c.setGroup("mouth","Sad",0);c.update();close(face.morphTargetInfluences,[0,1,1,1,0,0.6]);
+  c.setExpression(SAD,0);c.update();close(face.morphTargetInfluences,[0,1,0,1,0,0.6]);
   c.setMorphPoseWeights({});c.update();close(face.morphTargetInfluences,[0,0,0,0,0,0.6]);
 });
 test("different groups add actual Morph contributions rather than overriding",()=>{
@@ -196,7 +196,7 @@ test("invalid input throws without changing previous state",()=>{
   for(const values of [{a:0.6,i:0.5},{a:-0.1},{a:NaN},{unknown:0},[]]) assert.throws(()=>c.setVisemes(values));
   assert.throws(()=>c.setMorphPoseWeights({unknown:1}));
   assert.throws(()=>c.setMorphPoseWeights({a:Infinity}));
-  assert.throws(()=>c.setGroup("mouth","missing"));
+  assert.throws(()=>c.setExpression({...SAD,open:"missing"}));
   assert.throws(()=>c.setExpression("missing"));
   assert.throws(()=>c.setActive(1));
   c.setMorphPoseWeights({a:Number.MAX_VALUE});
@@ -206,9 +206,13 @@ test("invalid input throws without changing previous state",()=>{
 test("actual Morph difference conflict is rejected even with different pose names",()=>{
   const {root}=fixture();const d=definition();
   d.morphPoses.push({name:"alias",targets:{face:{close:1}}});
-  d.expressionGroups[0].states[0].controls.speech={alias:1};
+  d.expressionGroups[1].states.forEach(state=>{state.poses.alias=1;});
+  d.expressionGroups[1].states[2].poses.alias=2;
   assert.throws(()=>new ExpressionController(root,d),/同一实际 Morph/);
-  d.expressionGroups[0].states[0].poses.alias=1;
+  d.expressionGroups[1].states[2].poses.alias=1;
+  for(const state of d.expressionGroups[1].states) {
+    for(const endpoint of Object.values(state.controls?.visemes??{}))endpoint.alias=1;
+  }
   // Endpoint equal to baseline makes no change, and is therefore legal.
   assert.doesNotThrow(()=>new ExpressionController(root,d));
 });
@@ -277,7 +281,7 @@ test("real MotionPlayer captures initial Morph after pre-construction beginFrame
   c.beginFrame();c.update();
   assert.equal(face.morphTargetInfluences[3],0.4);
   c.setActive(true);c.beginFrame();c.update();
-  close(face.morphTargetInfluences,[0.75,0.25,1,0.9,0,0.6]);
+  close(face.morphTargetInfluences,[0.75,0.25,.1,0.9,0,0.6]);
   assert.equal(c.speech,0.9);
   assert.equal(c.blink,0.25);
 });
@@ -294,17 +298,17 @@ test("distinct Morph names resolving to the same index still conflict",()=>{
   const {root,face}=fixture();const d=definition();
   face.morphTargetDictionary.aliasClose=1;
   d.morphPoses.push({name:"alias",targets:{face:{aliasClose:1}}});
-  d.expressionGroups[0].states[0].controls.speech={alias:1};
+  d.expressionGroups[1].states[2].poses.alias=1;
   assert.throws(()=>new ExpressionController(root,d),/同一实际 Morph/);
   assert.equal(face.morphTargetInfluences[1],0.2);
 });
-test("without default preset the first declared states are selected",()=>{
+test("without default combination both mouth endpoints use the first state",()=>{
   const {root}=fixture();const d=definition();delete d.defaultExpression;
   d.expressionGroups[0].states.reverse();
   const c=new ExpressionController(root,d);
-  assert.equal(c.selections.get("face"),"Fixed");
-  c.setExpression("Sad");c.setSpeech(1);c.reset();
-  assert.equal(c.selections.get("face"),"Fixed");assert.equal(c.speech,0);
+  assert.deepEqual(c.getCapabilities().selections,{eye:"Fixed",closed:"Sad",open:"Sad"});
+  c.setExpression(SAD);c.setSpeech(1);c.reset();
+  assert.deepEqual(c.getCapabilities().selections,{eye:"Fixed",closed:"Sad",open:"Sad"});assert.equal(c.speech,0);
 });
 test("named and unnamed child GLTF nodes are not primitives of their parent",()=>{
   for (const childName of ["Child", undefined]) {
@@ -331,8 +335,7 @@ test("each primitive must contain every declared Morph target",()=>{
 test("valid recipe identifiers never inherit Object prototype values",()=>{
   const {root,face}=fixture();const d=definition();
   for (const name of ["toString","constructor","__proto__"]) d.morphPoses.push({name,targets:{face:{a:1}}});
-  d.expressionGroups[1].states[0].poses={};
-  d.expressionGroups[1].states[0].controls={speech:JSON.parse('{"toString":0.2,"constructor":0.3,"__proto__":0.4}')};
+  d.expressionGroups[1].states[2].poses=JSON.parse('{"toString":0.2,"constructor":0.3,"__proto__":0.4}');
   const c=new ExpressionController(root,d);c.setSpeech(0.5);c.update();
   assert.ok(Math.abs(face.morphTargetInfluences[3]-0.45)<1e-12);
 });
@@ -352,7 +355,7 @@ test("real GLTFLoader associations distinguish own primitives and child nodes",a
   registerExpressionNodes(gltf);
   const c=new ExpressionController(gltf.scene,{
     morphPoses:[{name:"smile",targets:{"Face original":{smile:1}}}],
-    expressionGroups:[],expressions:[],
+    expressionGroups:[],
   });
   c.setMorphPoseWeights({smile:0.63});c.update();
   const actual=[];
@@ -371,7 +374,7 @@ test("independent parameters remain unchanged by expression reset",()=>{
   assert.throws(()=>new ExpressionController(root,d),/重复拥有 Morph/);
 });
 test("empty capabilities leave unmanaged Morphs alone",()=>{
-  const {root,face}=fixture();const c=new ExpressionController(root,{morphPoses:[],expressionGroups:[],expressions:[]});
+  const {root,face}=fixture();const c=new ExpressionController(root,{morphPoses:[],expressionGroups:[]});
   c.setBlink(1);c.setSpeech(1);c.update();
   close(face.morphTargetInfluences,[0.1,0.2,0.3,0.4,0.5,0.6]);
   assert.equal(c.getCapabilities().blink,false);

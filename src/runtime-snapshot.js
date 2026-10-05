@@ -13,7 +13,7 @@ export function readonlySnapshot(value) {
 
 export function expressionDefinition(component) {
   if (!component.morphPoses) return null;
-  const fields = ["morphPoses", "expressionGroups", "expressions", "defaultExpression", "parameters"];
+  const fields = ["morphPoses", "expressionGroups", "defaultExpression", "parameters"];
   return readonlySnapshot(Object.fromEntries(fields
     .filter((key) => component[key] !== undefined)
     .map((key) => [key, component[key]])));

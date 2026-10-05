@@ -13,7 +13,7 @@ function fixture(catalog) {
   const actor = Object.assign(Object.create(OffscreenCharacter.prototype), {
     disposed: false, motionGeneration: 0, expressionGeneration: 0, catalog,
     character: {
-      config: { defaultMotion: 'idle' }, faceDefinition: { expressions: [{ name: 'Smile' }] },
+      config: { defaultMotion: 'idle' }, faceDefinition: { defaultExpression: {eye:'Smile',closed:'N',open:'A'} },
       async selectMotion(item, url) { calls.push(['motion', item?.name, url]); },
       async selectParameterMotion(item, url) { calls.push(['parameter-motion', item.name, url]); },
       async selectParameterExpression(item) { calls.push(['parameter-expression', item?.name]); },
@@ -50,21 +50,50 @@ test('native expressions retain priority over host parameter expression lookup',
   const { actor, calls } = fixture({ async resolveExpression(name) {
     queried.push(name); return entry('garupa-expression', name);
   } });
-  await actor.setExpression('Smile');
+  await actor.setExpression('3d:Smile/N/A');
   await actor.setExpression('anon/sad01');
   assert.deepEqual(queried, ['anon/sad01']);
-  assert.deepEqual(calls, [['parameter-face', false], ['expression', 'Smile'],
+  assert.deepEqual(calls, [['parameter-face', false], ['expression', {eye:'Smile',closed:'N',open:'A'}],
     ['parameter-expression', 'anon/sad01'], ['parameter-face', true]]);
 });
 
 test('named preparation uses the injected lookup and cached bytes', async () => {
   const fetched = [];
   await OffscreenCharacter.preloadNamed('https://unused.test/catalog.json', [
-    { kind: 'motion', name: 'idle.motionbin' }, { kind: 'expression', name: 'Smile' },
+    { kind: 'motion', name: 'idle.motionbin' }, { kind: 'expression', name: '3d:Smile/N/A' },
   ], { async resolveMotion(name, options) {
     assert.equal(options.optional, true); return entry('motion', name);
-  }, async resolveExpression() { return null; }, async fetch(url, kind) { fetched.push([url, kind]); } });
+  }, async resolveExpression() { assert.fail('Native combinations have no external resource'); }, async fetch(url, kind) { fetched.push([url, kind]); } });
   assert.deepEqual(fetched, [['https://game.test/game/3d/motion/idle.motionbin', 'bytes']]);
+});
+
+test('empty expression restores the model default after releasing parameter playback', async () => {
+  const {actor,calls}=fixture({async resolveExpression(){assert.fail('Default is native');}});
+  actor.character.parameterPlayer={};
+  await actor.setExpression('');
+  assert.deepEqual(calls,[['parameter-expression',undefined],['parameter-face',false],
+    ['expression',{eye:'Smile',closed:'N',open:'A'}]]);
+});
+
+test('native combination decodes each selected name independently', async () => {
+  const {actor,calls}=fixture({async resolveExpression(){assert.fail('Native is local');}});
+  await actor.setExpression('3d:Sad%2FWink/Smile%25/A%20wide');
+  assert.deepEqual(calls.at(-1),['expression',{eye:'Sad/Wink',closed:'Smile%',open:'A wide'}]);
+});
+
+test('model changes preserve available eye and mouth choices independently and retain host opening inputs', () => {
+  let selection={eye:'Open',closed:'N',open:'A'}, blink=0, speech=0;
+  const actor=Object.assign(Object.create(CharacterRenderer.prototype),{
+    faceDefinition:{defaultExpression:{eye:'Open',closed:'N',open:'A'}},
+    rememberedFace:{selections:{eye:'Sad',closed:'Missing',open:'I'},blink:.6,speech:.4},
+    face:{setExpression(value){selection={...value};},setBlink(value){blink=value;},setSpeech(value){speech=value;},
+      getCapabilities(){return {selections:selection,groups:[
+        {name:'face',type:'eye',states:['Open','Sad']},{name:'lips',type:'mouth',states:['N','A','I']} ]};}},
+  });
+  actor.initializeFace();
+  assert.deepEqual(selection,{eye:'Sad',closed:'N',open:'I'});
+  assert.deepEqual(actor.expressionName,selection);
+  assert.equal(blink,.6);assert.equal(speech,.4);
 });
 
 test('direct motionbin paths retain the current binary decoder', async () => {

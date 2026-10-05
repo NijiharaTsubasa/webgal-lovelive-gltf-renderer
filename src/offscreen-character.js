@@ -8,6 +8,7 @@ import { HostBlink } from './host-blink.js';
 import { frameCharacterCamera } from './camera-framing.js';
 import { CharacterWarmPool } from './character-warm-pool.js';
 import { prepareSceneTextures, yieldPreparationTask } from './texture-preparation.js';
+import { isNativeExpression, parseNativeExpression } from './native-expression.js';
 
 const catalogs = new Map();
 const surfaceIdentities = new WeakMap();
@@ -36,6 +37,10 @@ export class OffscreenCharacter {
   static async preloadNamed(indexUrl, requests, resourceCatalog) {
     const catalog = resourceCatalog ?? await catalogFor(indexUrl);
     await Promise.all(requests.map(async ({ kind, name }) => {
+      if (kind === 'expression' && isNativeExpression(name)) {
+        parseNativeExpression(name);
+        return;
+      }
       const resolver = kind === 'motion' ? catalog.resolveMotion : catalog.resolveExpression;
       if (resolver) {
         const entry = await resolver.call(catalog, name, { optional: true });
@@ -45,7 +50,6 @@ export class OffscreenCharacter {
       const entry = kind === 'motion'
         ? catalog.find('motion', name) ?? catalog.find('garupa-motion', name)
         : catalog.find('garupa-expression', name);
-      // A model's own preset expression has no external resource to preload.
       if (entry) await catalog.preload(entry.type, entry.name);
     }));
   }
@@ -178,16 +182,12 @@ export class OffscreenCharacter {
   async setExpression(name) {
     const generation = ++this.expressionGeneration;
     if (this.disposed) return;
-    if (!name) name = this.character.faceDefinition?.defaultExpression ?? '';
-    if (!name) {
-      if (this.character.parameterPlayer) await this.character.selectParameterExpression(null);
-      await this.character.setParameterFace(false); return;
-    }
-    if (this.character.faceDefinition?.expressions.some(entry => entry.name === name)) {
+    if (!name || isNativeExpression(name)) {
+      const selection = name ? parseNativeExpression(name) : this.character.faceDefinition?.defaultExpression;
       if (this.character.parameterPlayer) await this.character.selectParameterExpression(null);
       await this.character.setParameterFace(false);
       if (this.disposed || generation !== this.expressionGeneration) return;
-      this.character.setExpression(name);
+      this.character.setExpression(selection);
       return;
     }
     const entry = this.catalog.resolveExpression
