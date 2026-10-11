@@ -147,3 +147,38 @@ export function createDefaultPassObject(mesh, material, passId) {
   };
   return object;
 }
+
+export function realizeMaterialPass(mesh, shaderName, material, materialPass, resolvedTextures, runtimes, passIndex, sourceAvailable, scope) {
+  const label = `Shader ${shaderName} pass ${materialPass.id}`;
+  for (const runtime of runtimes) {
+    if (typeof runtime.configurePass !== "function") continue;
+    const result = runtime.configurePass(materialPass.id, material, mesh, materialPass, resolvedTextures);
+    if (result !== undefined) throw new Error(`${label}: configurePass() must not return a value`);
+  }
+  let objects = [];
+  for (const runtime of runtimes) {
+    if (typeof runtime.createPassObjects !== "function") continue;
+    const result = runtime.createPassObjects(materialPass.id, material, mesh, materialPass, resolvedTextures);
+    if (!Array.isArray(result)) throw new Error(`${label}: createPassObjects() must return Object3D[]`);
+    if (!result.length) continue;
+    if (objects.length) throw new Error(`${label}: multiple createPassObjects() providers`);
+    if (new Set(result).size !== result.length || result.some(object => !object?.isObject3D || object === mesh)) {
+      throw new Error(`${label}: createPassObjects() requires unique additional Object3D instances`);
+    }
+    objects = result;
+  }
+  if (!objects.length && sourceAvailable) return { sourceMaterial: material, objects: [] };
+  if (!objects.length) {
+    const object = createDefaultPassObject(mesh, material, materialPass.id);
+    scope.defaultPassObjects.push(object);
+    objects = [object];
+  }
+  for (const object of objects) {
+    object.userData.__parameterizedPassObject = true;
+    object.userData.__parameterizedPassId = materialPass.id;
+    object.userData.__parameterizedPassOrder = passIndex;
+    object.userData.__parameterizedBaseVisible = mesh.visible;
+    object.renderOrder = (materialPass.renderState.renderQueue ?? mesh.renderOrder) + passIndex / 1000;
+  }
+  return { sourceMaterial: null, objects };
+}

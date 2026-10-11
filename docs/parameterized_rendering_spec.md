@@ -324,17 +324,18 @@ Shader 条目可以通过 `script` 字段挂一个 JS 模块，用于表达 shad
 | `constructor(THREE, renderer, material, mesh)` | 材质首次绑定时一次 | 接收引擎引用、渲染器、材质、mesh |
 | `init(renderer)` | 构造后立刻 | 一次性创建 GPU 资源（RenderTarget、纹理等） |
 | `getUniforms(passId, passMetadata)` | shader 编译时（onBeforeCompile 内） | 返回此运行时需要注入当前 Pass `shader.uniforms` 的字段。返回 `{ uniformKey: { value } }`；不区分 Pass 的实现可以忽略参数。 |
-| `createPass(passId, material, mesh, passMetadata, resolvedTextures)` | 每个已声明 Pass 创建时一次 | 由 Shader JS 决定该 Pass 使用源 Mesh 的材质，还是创建附加 `Object3D`；需要自定义阴影／深度材质时也在此挂接。`resolvedTextures` 是当前 Pass 按 `samplers` 解析后的 `{ 槽名: THREE.Texture }`，只在运行时传入，不写入资源元数据。 |
+| `configurePass(passId, material, mesh, passMetadata, resolvedTextures)` | 每个已声明 Pass 创建时一次 | 配置已准备的 Pass 材质及 Shader 专用状态，无返回值。`resolvedTextures` 是当前 Pass 按 `samplers` 解析后的 `{ 槽名: THREE.Texture }`，只在运行时传入，不写入资源元数据。需要自定义阴影／深度材质时也在此挂接。 |
+| `createPassObjects(passId, material, mesh, passMetadata, resolvedTextures)` | 当前 Pass 的全部 `configurePass()` 完成后一次 | 创建、挂接该 Pass 的附加绘制对象，返回 `Object3D[]`。空数组表示使用宿主默认绘制对象。 |
 | `onBeforeRender(renderer, scene, camera)` | 渲染前（每帧 1 次） | 渲染插入点；可读 scene/camera 作为上下文。是否可修改外部状态由 §2.5 约束条款约束 |
 | `destroy()` | 运行时实例释放时 | 释放 GPU 资源，防止泄漏 |
 
 #### 约束
 
 - **JS 与 GLSL 强绑定**：JS 访问的 uniform 名（如 `getUniforms()` 返回的键）必须与 `shader.glsl` 声明一致；Shader 包作者自保证。
-- **普通 Pass 不需要 JS**：没有任何运行时类接管某个 Pass 时，由通用渲染器完成普通材质 Pass 的绘制。
-- **`createPass()` 只覆盖默认实现**：全屏对象、特殊挂接或额外资源生命周期不同于默认行为时，才由一个运行时类返回非空结果；其他类返回 `null` / `undefined`。多个非空结果必须报错。
-- **返回传入的 `material`**：表示该 Pass 使用源 Mesh 的当前材质槽。多个 Pass 如需独立绘制，宿主须为其提供独立绘制项。
-- **返回 `Object3D` 或非空 `Object3D[]`**：Shader JS 负责创建、挂接、逐帧同步和最终移除这些对象；渲染端登记 Pass ID、默认顺序及释放协调。不创建附加对象时返回 `null` / `undefined`，走默认 Pass 路径。
+- **可选钩子**：普通 Pass 由宿主创建材质和绘制对象。运行时可分别实现材质配置钩子和附加对象创建钩子。
+- **材质配置**：宿主先准备 section、uniform、sampler 和固定状态，再按运行时注册顺序调用当前 Pass 的所有 `configurePass()`；该方法同步执行，无返回值。
+- **绘制对象创建**：`createPassObjects()` 同步返回数组，数组中的对象必须是彼此不同且区别于源 Mesh 的 `Object3D`。每个 Pass 至多由一个运行时返回非空数组。Shader JS 负责挂接、逐帧同步及最终移除这些对象；宿主登记 Pass ID、默认顺序及释放协调。
+- **默认绘制对象**：全部创建钩子缺省或返回空数组时，宿主将第一个使用默认对象的 Pass 材质绑定到源 Mesh，其余默认 Pass 使用独立克隆 Mesh 并同步 Morph。每个源材质至少有一个 Pass 使用源 Mesh。
 - **Pass 对象语义归 Shader JS**：克隆 Mesh、复用骨架、添加全屏 Mesh、更新动态 uniform 等行为不由通用渲染器根据 Pass 名推断。
 - **附属绘制材质归 Shader JS**：原程序对 ShadowCaster、Depth 等管线有专用裁剪或顶点逻辑时，Shader JS 可用已解析纹理给 Mesh 挂接 `customDepthMaterial`／`customDistanceMaterial` 等 Three 材质，并在 `destroy()` 恢复原状态、释放自建材质；通用渲染器不根据 Shader 名实现这些公式。
 - **临时状态须恢复**：运行时实例若修改外部 scene graph 或 renderer 状态，退出相关渲染阶段前必须恢复。
@@ -362,8 +363,8 @@ Pass 的注入位置及其引用的 section。
 4. 每个 Pass 必须有独立的有效材质状态和 Shader 程序缓存身份，不得因缓存复用而套用
    另一个 Pass 的 section 或固定状态。Three.js 宿主可用独立 Material 和包含 Shader、
    源材质及 Pass 身份的 program cache key 实现。
-5. 有 `script` 时按 §2.5 创建运行时实例、调用其可选生命周期并释放其资源；没有
-   `createPass()` 接管时执行普通材质 Pass。
+5. 有 `script` 时按 §2.5 创建运行时实例、调用其可选生命周期并释放其资源。
+   按顺序调用当前 Pass 的材质配置和附加对象创建钩子，再登记绘制对象。
 6. 没有其他执行计划介入时，按 Material `passes[]` 顺序执行全部声明 Pass。上层渲染
    配置可以消费 Pass ID 并提供其他执行计划；其格式和调度语义不在本文定义。
 

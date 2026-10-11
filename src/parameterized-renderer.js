@@ -10,7 +10,7 @@ import {
 import { applyRenderState, installUnityColorMaskSupport } from "./unity-render-state.js";
 import { validateResourceManifest } from "./resource-manifest.js";
 import {
-  createDefaultPassObject,
+  realizeMaterialPass,
   resolveMaterialPasses,
   sectionNamesForPosition,
   validateShaderPasses,
@@ -322,6 +322,9 @@ function instantiateShaderRuntime(material, rendererArg, preparedShader, mesh, s
   for (const Ctor of classes) {
     const runtime = new Ctor(THREE, rendererArg, material, mesh);
     scope.runtimes.push(runtime);
+    if (typeof runtime.createPass === "function") {
+      throw new Error("Shader runtime must use configurePass() and createPassObjects()");
+    }
     if (typeof runtime.init === "function") runtime.init(rendererArg);
     runtimes.push(runtime);
   }
@@ -373,54 +376,6 @@ export function createShaderRuntimeScope(renderer, registry = defaultShaderRegis
       disposeShaderRuntimes(scope);
     },
   };
-}
-
-// Ask the Shader runtime to realize one declared material pass. No runtime
-// result selects the generic same-mesh implementation; one result overrides
-// it with either the pass material or runtime-owned Object3D instances.
-function realizeMaterialPass(mesh, shaderName, material, materialPass, resolvedTextures, runtimes, passIndex, sourceAvailable, scope) {
-  const results = [];
-  for (const runtime of runtimes) {
-    if (typeof runtime.createPass !== "function") continue;
-    const result = runtime.createPass(materialPass.id, material, mesh, materialPass, resolvedTextures);
-    if (result !== undefined && result !== null) results.push(result);
-  }
-  if (results.length === 0 && sourceAvailable) {
-    return { sourceMaterial: material, objects: [] };
-  }
-  if (results.length === 0) {
-    const object = createDefaultPassObject(mesh, material, materialPass.id);
-    scope.defaultPassObjects.push(object);
-    results.push(object);
-  }
-  if (results.length !== 1) {
-    material.dispose();
-    throw new Error(`Shader ${shaderName} pass ${materialPass.id} has multiple createPass() results`);
-  }
-
-  const values = Array.isArray(results[0]) ? results[0] : [results[0]];
-  if (!values.length) {
-    material.dispose();
-    throw new Error(`Shader ${shaderName} pass ${materialPass.id}: createPass() returned an empty array`);
-  }
-  if (values.length === 1 && values[0] === material) {
-    return { sourceMaterial: material, objects: [] };
-  }
-  for (const object of values) {
-    if (!object?.isObject3D) {
-      material.dispose();
-      throw new Error(
-        `Shader ${shaderName} pass ${materialPass.id}: createPass() must return its material or Object3D`,
-      );
-    }
-    object.userData.__parameterizedPassObject = true;
-    object.userData.__parameterizedPassId = materialPass.id;
-    object.userData.__parameterizedPassOrder = passIndex;
-    object.userData.__parameterizedBaseVisible = mesh.visible;
-    const queue = materialPass.renderState.renderQueue ?? mesh.renderOrder;
-    object.renderOrder = queue + passIndex / 1000;
-  }
-  return { sourceMaterial: null, objects: values };
 }
 
 // ============================================================================
@@ -535,7 +490,7 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
           );
           if (result.sourceMaterial) {
             if (sourceResult) {
-              throw new Error(`Material ${mat.name || i}: multiple passes returned their material`);
+              throw new Error(`Material ${mat.name || i}: multiple source passes`);
             }
             sourceResult = { material: result.sourceMaterial, pass: prepared.materialPass, passIndex };
           }
@@ -546,7 +501,7 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
           });
         }
         if (!sourceResult) {
-          throw new Error(`Material ${mat.name || i}: one pass must return its material for the source mesh`);
+          throw new Error(`Material ${mat.name || i}: one pass must use the source mesh`);
         }
         out[i] = sourceResult.material;
         sourcePassStates.push(sourceResult.pass.renderState);
