@@ -95,6 +95,12 @@ export class OffscreenCharacter {
     this.motionGeneration = 0;
   }
 
+  /** Readiness checks must not compile, render, or advance the actor. */
+  get isUsable() {
+    return !this.disposed && this.prepared === true && !this.surface?.disposed
+      && !this.renderer.getContext().isContextLost();
+  }
+
   async load({ modelUrl, indexUrl, resourceCatalog, runtime, framing, motion = '', expression = '', meshClothEnabled = true, focus }) {
     if (typeof meshClothEnabled !== 'boolean') throw new Error('meshClothEnabled must be boolean');
     this.character.meshClothEnabled = meshClothEnabled;

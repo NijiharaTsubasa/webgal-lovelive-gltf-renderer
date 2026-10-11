@@ -43,6 +43,8 @@ export class OffscreenCharacter {
   static preloadNamed(indexUrl: string, requests: Array<{ kind: 'motion' | 'expression'; name: string }>, resourceCatalog?: CharacterResourceCatalog): Promise<void>;
   static takePreloaded(options: OffscreenCharacterOptions): Promise<OffscreenCharacter | null>;
   canvas: HTMLCanvasElement;
+  /** Prepared resident with a live rendering context; querying does not perform GPU work. */
+  readonly isUsable: boolean;
   setMotion(name: string): Promise<void>;
   setFocus(value: { x?: number; y?: number; instant?: boolean }): void;
   /** Native: 3d:<encoded eye>/<encoded closed>/<encoded open> or 3d:face/<encoded face>; empty selects the model default. */

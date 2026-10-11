@@ -32,6 +32,17 @@ test('load registers a standalone render-profile package before loading the mode
   assert.deepEqual(calls, ['fetch', 'register', 'model']);
 });
 
+test('readiness is synchronous and rejects unprepared, disposed or lost-context actors', () => {
+  let lost=false;
+  const surface={disposed:false};
+  const actor=offscreenFixture({prepared:true,surface,renderer:{getContext:()=>({isContextLost:()=>lost})}});
+  assert.equal(actor.isUsable,true);
+  actor.prepared=false;assert.equal(actor.isUsable,false);actor.prepared=true;
+  lost=true;assert.equal(actor.isUsable,false);lost=false;
+  surface.disposed=true;assert.equal(actor.isUsable,false);surface.disposed=false;
+  actor.disposed=true;assert.equal(actor.isUsable,false);
+});
+
 function fixture() {
   const scene = new THREE.Scene(), root = new THREE.Group(), hair = new THREE.Object3D();
   root.add(hair); scene.add(root);
