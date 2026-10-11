@@ -29,6 +29,7 @@
 | `humanoidScale` | number | 必需 | 当前 GLB 的静态人体尺度，必须为正有限数；供标准动作恢复 `Hips` 位移 |
 | `behaviors` | `BehaviorDeclaration[]` | 可选 | 当前组件声明的模型运行时 Behavior 及其参数；见 §1.8 |
 | `physics` | object | 可选 | 辅助骨、布面及碰撞体配置；见[模型物理字段标准](model_physics_spec.md) |
+| `renderProfile` | string | 可选 | 非空、区分大小写的角色渲染配置名称；见[角色渲染配置包规范](parameterized_rendering_spec.md#4-角色渲染配置包) |
 
 每个 GLB 各自保留 `humanoidScale`，同目录不同条目的值不要求相同。组合播放动作时采用 body 条目的值；head 条目的值可供独立检查、资产聚合或其他调用方使用。
 
@@ -151,6 +152,8 @@ head 独有的非核心骨与网格须保持中性姿势下的世界外观，并
 组合角色使用 head 的[表情定义](model_expression_spec.md)，按 §1.8 汇总并启动
 Behavior 后建立动作参考姿势；物理等扩展中的核心骨引用也指向同一权威骨架。
 有效 `humanoidScale` 取 body，`motionGroup` 按 §1.4 确定。
+
+组合时 head 与 body 的 `renderProfile` 必须相同，包含两者均省略的情况；组合结果使用该值。已声明的配置及其依赖必须可用，否则拒绝加载。
 
 ### 1.8 模型运行时 Behavior 声明
 

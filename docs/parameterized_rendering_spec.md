@@ -366,12 +366,77 @@ Pass 的注入位置及其引用的 section。
 5. 有 `script` 时按 §2.5 创建运行时实例、调用其可选生命周期并释放其资源。
    按顺序调用当前 Pass 的材质配置和附加对象创建钩子，再登记绘制对象。
 6. 没有其他执行计划介入时，按 Material `passes[]` 顺序执行全部声明 Pass。上层渲染
-   配置可以消费 Pass ID 并提供其他执行计划；其格式和调度语义不在本文定义。
+   配置按 §4 消费 Pass ID 并提供帧绘制计划。
 
 整条路径对所有 shader 一致——**渲染代码不应按 `extras.shader` 的字符串值特判**。
 
 ### 3.3 边界
 
 动态 uniform、RenderTarget 和全局输入由 Shader JS 或宿主场景提供，不写入材质的
-静态参数表。跨对象渲染阶段和 Pass 选择可由上层渲染配置负责；本文不定义其格式。
+静态参数表。跨对象渲染阶段和 Pass 选择由 §4 的角色渲染配置负责。
 Shader 私有的逐 Pass 数据可放在 `passes[].extras`，通用渲染器不解释内容。
+
+## 4. 角色渲染配置包
+
+角色渲染配置包完整负责已注册 Humanoid 角色的一帧绘制，用于需要组织多个 Pass、深度或颜色复制、离屏纹理和全屏合成的角色管线。模型通过 `renderProfile` 引用配置的完整名称；未声明时使用宿主的默认角色绘制。
+
+### 4.1 声明与资源
+
+配置是[统一资源包](resource_package_spec.md)中的组件。相对路径以所在 `config.json` 为基准。
+
+```json
+{
+  "components": [{
+    "type": "render-profile",
+    "name": "example-character",
+    "script": "runtime.js",
+    "requiredShaders": ["example-toon"]
+  }]
+}
+```
+
+`name` 为全局唯一的非空字符串，区分大小写。`script` 指向 JavaScript ES 模块。`requiredShaders` 是所需 Shader 名称数组，可为空。名称冲突、缺失配置或缺失依赖使引用该配置的角色加载失败。
+
+### 4.2 JavaScript 接口
+
+模块导出工厂：
+
+```javascript
+export function createRenderProfile({ THREE, renderer, createPassMaterial }) {
+  return {
+    attach(characterRoot) {},
+    detach(characterRoot) {},
+    async prepare(frame) {},
+    render(frame) {},
+    destroy() {}
+  };
+}
+```
+
+`attach` 注册角色根节点，可以返回 Promise；`detach` 解除注册。一个实例可以管理多个角色。`prepare` 返回 Promise，在角色首次显示前准备所需 Shader 程序和 GPU 资源；准备完成后角色才可显示。`render`、`detach` 与 `destroy` 同步执行且无返回值。
+
+工厂中的 `THREE` 和 `renderer` 是宿主实际使用的实例。`createPassMaterial(sourceMaterial, passId, mesh)` 返回 `Promise<THREE.Material>`：从源材质的 Shader 声明中选择指定 Pass，合并参数、纹理与渲染状态，注入 sections、绑定 sampler，并执行 Shader Runtime 的 `configurePass`。可选择 Shader 声明中的辅助 Pass。此工厂只建立材质，绘制对象由配置包组织。工厂创建的材质由宿主管理释放。
+
+### 4.3 帧输入与绘制所有权
+
+`prepare` 与 `render` 使用相同的帧输入：
+
+```javascript
+{
+  scene, camera,
+  time, delta,
+  target, viewport, scissor, scissorTest
+}
+```
+
+`time` 与 `delta` 的单位为秒，由宿主播放时钟提供。暂停与预热期间按宿主的时钟状态取值。`target` 为本帧输出 RenderTarget，`null` 表示默认帧缓冲；`viewport`、`scissor` 为当前绘制目标上的物理像素矩形，`scissorTest` 表示裁剪是否启用。
+
+每次绘制调用只启用一个配置包。一个 renderer 可以保留多个配置包实例，并在不同绘制调用中选择相应实例。宿主每帧更新 Shader Runtime 后调用配置包的 `render`，由配置包完成这一帧的角色输出。
+
+配置包可收集材质、选择 Pass、调整对象显隐、切换材质、调用 `renderer.render()`、创建 RenderTarget 或 MRT、复制颜色和深度、清空纹理、执行全屏绘制、更新全局 uniform、保存跨帧状态。具体步骤及顺序由包内 JavaScript 定义。
+
+### 4.4 状态与资源
+
+`prepare`、`render` 和生命周期操作结束或抛错时，须恢复临时修改的输出 RenderTarget、viewport、scissor、裁剪启用状态、材质、对象显隐及其他影响宿主后续绘制的 renderer 状态。输出须满足宿主目标的颜色空间与 alpha 语义。
+
+取消准备或加载失败时，须撤销已完成的注册并释放部分创建的资源。`destroy` 释放配置包自己创建的 GPU 资源和跨帧状态；宿主负责自己拥有的角色资源及工厂材质。解除一个角色的注册不得释放其他已注册角色正在使用的资源。

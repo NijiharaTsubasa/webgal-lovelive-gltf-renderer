@@ -15,6 +15,7 @@ import { ParameterPlayer } from "./garupa/player.js";
 import { ParameterBodyPose } from "./garupa/body-pose.js";
 import bodyCalibration from "./garupa/body-calibration.js";
 import { CharacterFocus } from './character-focus.js';
+import { createRenderProfileScope } from './render-profiles.js';
 
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
 // resource catalog, clock and UI; none of those are assumed to be a preview page.
@@ -61,6 +62,8 @@ export class CharacterRenderer {
     this.parameterExpressionGeneration = 0;
     this.parameterFaceActive = false;
     this.shaderScope = null;
+    this.renderProfileScope = null;
+    this.frameDelta = 0;
     this.focus = new CharacterFocus();
     this.focusAdapter = null;
     this.focusAdapterGeneration = 0;
@@ -276,15 +279,20 @@ export class CharacterRenderer {
     this.faceDefinition = null;
     this.expressionControllers = [];
     this.expressionName = "";
-    this.shaderScope?.dispose();
+    let resourceFailure;
+    for (const resource of [this.renderProfileScope, this.shaderScope, this.modelResources]) {
+      try { resource?.dispose(); } catch (error) { resourceFailure ??= error; }
+    }
+    this.renderProfileScope = null;
     this.shaderScope = null;
-    this.modelResources?.dispose();
     this.modelResources = null;
     if (this.root) this.scene.remove(this.root);
     this.root = null;
     this.config = null;
     this.motionGroup = null;
     this.elapsedTime = 0;
+    this.frameDelta = 0;
+    if (resourceFailure) throw resourceFailure;
   }
 
   async load(entries, packagesRoot) {
@@ -294,6 +302,9 @@ export class CharacterRenderer {
     if (!integrated && !composed) throw new Error("角色必须是一体化模型或同组 head + body");
     if (composed && (!entries[0].group || entries[0].group !== entries[1].group)) {
       throw new Error(`组合资源 group 不兼容：${entries[0].group || "<empty>"} / ${entries[1].group || "<empty>"}`);
+    }
+    if (composed && entries[0].component.renderProfile !== entries[1].component.renderProfile) {
+      throw new Error('组合资源 renderProfile 不兼容');
     }
     this.clear();
     const generation = this.generation;
@@ -325,6 +336,7 @@ export class CharacterRenderer {
       let manager;
       let physics;
       let shaderScope;
+      let renderProfileScope;
       let committed = false;
       try {
         if (composed) {
@@ -346,6 +358,15 @@ export class CharacterRenderer {
           await shaderScope.applyCustomShaders(part.gltf, part.root);
           if (generation !== this.generation) return null;
         }
+        if (body.component.renderProfile !== undefined) {
+          const factory = await this.resourcePackages.renderProfiles.load(body.component.renderProfile, this.resourcePackages.shaders);
+          if (generation !== this.generation) return null;
+          const profile = factory({ THREE, renderer: this.renderer, createPassMaterial: shaderScope.createPassMaterial });
+          try { renderProfileScope = createRenderProfileScope(profile, this.renderer); }
+          catch (error) { profile?.destroy?.(); throw error; }
+          await renderProfileScope.attach(root);
+          if (generation !== this.generation) return null;
+        }
         // Three caches a SkinnedMesh's bounds from one pose; skeletal motion
         // does not update them. Small parts can otherwise vanish while their
         // deformed vertices are still on screen. Include shader-created passes
@@ -363,6 +384,7 @@ export class CharacterRenderer {
         });
         const face = controllers.find((item) => item.role === "head" || item.role === "integrated")?.controller;
         this.root = root;
+        this.renderProfileScope = renderProfileScope ?? null;
         this.focus.bind(root);
         this.modelResources = modelResources;
         this.parts = parts;
@@ -401,12 +423,17 @@ export class CharacterRenderer {
             this.behaviors = null;
             this.physics = null;
           }
-          physics?.destroy();
-          manager?.destroy();
-          shaderScope?.dispose();
+          let cleanupFailure;
+          for (const resource of [physics, manager, renderProfileScope, shaderScope, modelResources]) {
+            try {
+              if (resource?.dispose) resource.dispose();
+              else resource?.destroy();
+            } catch (error) { cleanupFailure ??= error; }
+          }
+          if (this.renderProfileScope === renderProfileScope) this.renderProfileScope = null;
           if (this.shaderScope === shaderScope) this.shaderScope = null;
-          modelResources.dispose();
           if (this.modelResources === modelResources) this.modelResources = null;
+          if (cleanupFailure) throw cleanupFailure;
         }
       }
     });
@@ -535,6 +562,7 @@ export class CharacterRenderer {
   }
 
   update(delta) {
+    this.frameDelta = delta;
     let motionChange = null;
     const animate = step => { motionChange = this.evaluatePose(step) ?? motionChange; };
     if (this.physics) this.physics.advance(delta, animate, () => {
@@ -549,6 +577,7 @@ export class CharacterRenderer {
   }
 
   prepareFrame() {
+    this.frameDelta = 0;
     // Evaluate exactly one zero-time tick without consuming the fixed-step
     // accumulator. update(0) retains the solver's normal initial settling.
     this.physics?.beforeAnimation();
@@ -560,9 +589,15 @@ export class CharacterRenderer {
     return change;
   }
 
+  async prepareRenderResources() {
+    await this.renderProfileScope?.prepare(this.scene, this.camera, this.elapsedTime, this.frameDelta);
+  }
+
   render() {
     this.shaderScope?.tick(this.scene, this.camera);
-    this.renderer.render(this.scene, this.camera);
+    if (this.shadersEnabled && this.renderProfileScope) {
+      this.renderProfileScope.render(this.scene, this.camera, this.elapsedTime, this.frameDelta);
+    } else this.renderer.render(this.scene, this.camera);
   }
 
   dispose() { this.clear({ rememberFace: false }); }

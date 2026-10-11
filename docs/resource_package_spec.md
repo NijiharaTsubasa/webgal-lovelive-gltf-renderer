@@ -3,6 +3,8 @@
 本文规定模型、Shader、Behavior 及其他组件资源共用的 `config.json`
 外层结构。各资源类型的专有字段由对应规范定义。
 
+角色帧绘制组件 `render-profile` 见[角色渲染配置包规范](parameterized_rendering_spec.md#4-角色渲染配置包)。
+
 标准动作以自包含的 `.json` 或 `.motionbin` 文件交付，字段与编码见
 [标准动作规范](standardized_motion_spec.md) §1。
 

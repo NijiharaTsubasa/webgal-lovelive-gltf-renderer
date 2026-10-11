@@ -100,7 +100,7 @@ export class OffscreenCharacter {
     this.character.meshClothEnabled = meshClothEnabled;
     this.catalog = resourceCatalog ?? await catalogFor(indexUrl);
     if (this.disposed) return;
-    const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior'].includes(item.type)).map(item => item.config));
+    const dependencyConfigs = new Set(this.catalog.entries.filter(item => ['shader', 'behavior', 'render-profile'].includes(item.type)).map(item => item.config));
     for (const config of dependencyConfigs) {
       const packageConfig = await this.catalog.fetch(config);
       if (this.disposed) return;
@@ -150,6 +150,8 @@ export class OffscreenCharacter {
     this.character.prepareFrame();
     if (this.disposed) return;
     if (!this.prepared) await yieldPreparationTask();
+    if (this.disposed) return;
+    await this.character.prepareRenderResources?.();
     if (this.disposed) return;
     await this.renderer.compileAsync(this.scene, this.camera);
     if (this.disposed) return;

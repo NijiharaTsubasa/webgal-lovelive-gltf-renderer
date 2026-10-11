@@ -276,6 +276,7 @@ function makePassMaterial(shaderName, preparedShader, source, materialPass, tex,
   material.userData.__parameterizedShader = shaderName;
   material.userData.__parameterizedPassId = materialPass.id;
   material.userData.__parameterizedShaderRuntimes = runtimes;
+  material.userData.materialPass = materialPass;
   material.onBeforeCompile = makePatcher(preparedShader, materialPass, tex, runtimes, material);
   applyRenderState(material, materialPass.renderState);
   return material;
@@ -353,13 +354,14 @@ export function disposeShaderRuntimes(scope = defaultShaderScope) {
     for (const material of materials) material?.dispose?.();
   }
   scope.defaultPassObjects.length = 0;
+  scope.materialBindings = new WeakMap();
   scope.resources?.dispose();
   if (!scope.disposed) scope.resources = new CharacterResourceOwner();
 }
 
 // Low-level preview hosts use the default scope. CharacterRenderer owns a
 // separate scope for each model load so unload and cancellation stay local.
-const defaultShaderScope = { renderer: null, registry: defaultShaderRegistry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), disposed: false };
+const defaultShaderScope = { renderer: null, registry: defaultShaderRegistry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), materialBindings: new WeakMap(), disposed: false };
 export function setShaderRenderer(r) {
   installUnityColorMaskSupport(r);
   defaultShaderScope.renderer = r;
@@ -367,15 +369,71 @@ export function setShaderRenderer(r) {
 
 export function createShaderRuntimeScope(renderer, registry = defaultShaderRegistry) {
   installUnityColorMaskSupport(renderer);
-  const scope = { renderer, registry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), disposed: false };
+  const scope = { renderer, registry, runtimes: [], defaultPassObjects: [], resources: new CharacterResourceOwner(), materialBindings: new WeakMap(), disposed: false };
   return {
     applyCustomShaders: (gltf, root) => applyCustomShaders(gltf, root, renderer, scope),
     tick: (scene, camera) => tickShaderRuntimes(scene, camera, scope),
+    createPassMaterial: (sourceMaterial, passId, mesh) => createPassMaterial(sourceMaterial, passId, mesh, scope),
     dispose() {
       scope.disposed = true;
       disposeShaderRuntimes(scope);
     },
   };
+}
+
+async function resolvePassTextures(shaderName, shader, materialPass, getTextureBinding, scope) {
+  const textures = {};
+  for (const [slot, index] of Object.entries(materialPass.textures)) {
+    if (Array.isArray(index)) {
+      if (!index.length) throw new Error(`Shader ${shaderName}: ${slot} has no array layers`);
+      textures[slot] = await Promise.all(index.map(getTextureBinding));
+    } else textures[slot] = await getTextureBinding(index);
+  }
+  const resolved = await resolveSamplerTextures(shader.samplers, textures,
+    uri => scope.registry.loadTexture(shaderName, uri), `Shader ${shaderName} pass ${materialPass.id}`);
+  for (const descriptor of shader.samplers) {
+    if (descriptor.type === 'sampler2DArray' && Object.hasOwn(textures, descriptor.name)) scope.resources?.add(resolved[descriptor.name]);
+  }
+  return resolved;
+}
+
+// Profiles request a material only. The configured Shader runtime is shared
+// with the source material, and object/pass scheduling stays with the caller.
+export async function createPassMaterial(sourceMaterial, passId, mesh, scope = defaultShaderScope) {
+  if (scope.disposed) throw new Error('Shader runtime scope has been disposed');
+  if (!sourceMaterial?.isMaterial || !mesh?.isMesh) throw new Error('createPassMaterial requires a Material and Mesh');
+  const binding = scope.materialBindings.get(sourceMaterial)?.get(mesh);
+  if (!binding) throw new Error('createPassMaterial requires a source Material/Mesh registered in this Shader scope');
+  const definition = binding.shader.passes.find(pass => pass.id === passId);
+  if (!definition) throw new Error(`Shader ${binding.shaderName}: unknown auxiliary pass ${passId}`);
+  let materials = binding.materials.get(mesh);
+  if (!materials) { materials = new Map(); binding.materials.set(mesh, materials); }
+  if (materials.has(passId)) return materials.get(passId);
+  const pending = (async () => {
+    const sourcePass = binding.source.userData.passes?.find(pass => pass.id === passId) ?? { id: passId };
+    const [materialPass] = resolveMaterialPasses(binding.shader.component,
+      { ...binding.source.userData, passes: [sourcePass] }, `Auxiliary material ${sourceMaterial.name || '<unnamed>'}`);
+    materialPass.sections = definition.sections;
+    materialPass.extras = { ...(definition.extras || {}), ...materialPass.extras };
+    const textures = await resolvePassTextures(binding.shaderName, binding.shader, materialPass, binding.getTextureBinding, scope);
+    if (scope.disposed) throw new Error('Shader runtime scope has been disposed');
+    const material = scope.resources.add(makePassMaterial(binding.shaderName, binding.shader, binding.source, materialPass, textures, binding.runtimes));
+    registerMaterialBinding(scope, material, mesh, binding);
+    for (const runtime of binding.runtimes) {
+      const result = runtime.configurePass?.(passId, material, mesh, materialPass, textures);
+      if (result !== undefined) throw new Error(`Shader ${binding.shaderName} pass ${passId}: configurePass() must not return a value`);
+    }
+    return material;
+  })();
+  materials.set(passId, pending);
+  pending.catch(() => { if (materials.get(passId) === pending) materials.delete(passId); });
+  return pending;
+}
+
+function registerMaterialBinding(scope, material, mesh, binding) {
+  let bindings = scope.materialBindings.get(material);
+  if (!bindings) { bindings = new WeakMap(); scope.materialBindings.set(material, bindings); }
+  bindings.set(mesh, binding);
 }
 
 // ============================================================================
@@ -437,26 +495,7 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
 
         const resolvedPasses = [];
         for (const materialPass of materialPasses) {
-          const textures = {};
-          for (const [slot, index] of Object.entries(materialPass.textures)) {
-            if (Array.isArray(index)) {
-              if (index.length === 0) throw new Error(`Material ${mat.name || i}: ${slot} has no array layers`);
-              textures[slot] = await Promise.all(index.map(getTextureBinding));
-            } else {
-              textures[slot] = await getTextureBinding(index);
-            }
-          }
-          const resolvedTextures = await resolveSamplerTextures(
-            shader.samplers,
-            textures,
-            (uri) => scope.registry.loadTexture(shaderName, uri),
-            `Shader ${shaderName} pass ${materialPass.id}`,
-          );
-          for (const descriptor of shader.samplers) {
-            if (descriptor.type === "sampler2DArray" && Object.hasOwn(textures, descriptor.name)) {
-              scope.resources?.add(resolvedTextures[descriptor.name]);
-            }
-          }
+          const resolvedTextures = await resolvePassTextures(shaderName, shader, materialPass, getTextureBinding, scope);
           resolvedPasses.push({ materialPass, resolvedTextures });
         }
 
@@ -464,6 +503,8 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
         const firstClone = mat.clone();
         scope.resources?.add(firstClone);
         const runtimes = instantiateShaderRuntime(firstClone, rendererInstance, shader, object, scope);
+        const binding = { shaderName, shader, source: mat, runtimes, getTextureBinding, materials: new WeakMap() };
+        registerMaterialBinding(scope, mat, object, binding);
         let sourceResult = null;
         const registeredPasses = [];
         for (const [passIndex, prepared] of resolvedPasses.entries()) {
@@ -477,6 +518,7 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
             passIndex === 0 ? firstClone : undefined,
           );
           scope.resources?.add(passMaterial);
+          registerMaterialBinding(scope, passMaterial, object, binding);
           const result = realizeMaterialPass(
             object,
             shaderName,
@@ -488,6 +530,9 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
             sourceResult === null,
             scope,
           );
+          for (const passObject of result.objects) {
+            registerMaterialBinding(scope, passMaterial, passObject, binding);
+          }
           if (result.sourceMaterial) {
             if (sourceResult) {
               throw new Error(`Material ${mat.name || i}: multiple source passes`);

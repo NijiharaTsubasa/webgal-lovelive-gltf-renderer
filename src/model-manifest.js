@@ -188,6 +188,10 @@ export function validateModelManifest(config, source = "config.json") {
       fail(componentSource, "model 必须是非空相对路径");
     }
     requirePositiveScale(component, componentSource);
+    if (component.renderProfile !== undefined
+        && (typeof component.renderProfile !== "string" || !component.renderProfile.trim())) {
+      fail(componentSource, "renderProfile 必须是非空资源名称");
+    }
     if (component.defaultMotion !== undefined
         && (typeof component.defaultMotion !== "string" || !component.defaultMotion.trim())) {
       fail(componentSource, "defaultMotion 必须是非空动作名称");

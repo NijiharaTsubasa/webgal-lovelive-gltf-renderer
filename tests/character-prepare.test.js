@@ -13,6 +13,25 @@ function offscreenFixture({ character, ...options }) {
   });
 }
 
+test('load registers a standalone render-profile package before loading the model', async () => {
+  const profileConfig = 'https://example.test/profile/config.json';
+  const manifest = { components: [{ type: 'render-profile', name: 'standalone', script: './profile.js', requiredShaders: [] }] };
+  const calls = [];
+  const entry = { config: 'https://example.test/model/config.json' };
+  const catalog = {
+    entries: [{ type: 'render-profile', config: profileConfig }],
+    async fetch(url) { assert.equal(url, profileConfig); calls.push('fetch'); return manifest; },
+    async model() { return entry; },
+    async preloadModelDependencies(value) { assert.equal(value, entry); },
+  };
+  const actor = offscreenFixture({ character: {
+    resourcePackages: { register(value, url) { assert.equal(value, manifest); assert.equal(url, profileConfig); calls.push('register'); } },
+    async load() { calls.push('model'); actor.disposed = true; },
+  } });
+  await actor.load({ modelUrl: entry.config, resourceCatalog: catalog });
+  assert.deepEqual(calls, ['fetch', 'register', 'model']);
+});
+
 function fixture() {
   const scene = new THREE.Scene(), root = new THREE.Group(), hair = new THREE.Object3D();
   root.add(hair); scene.add(root);
