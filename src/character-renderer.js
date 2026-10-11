@@ -190,7 +190,7 @@ export class CharacterRenderer {
         selection = {};
         for (const group of this.face.getCapabilities().groups) {
           if (group.type === 'eye') selection.eye = group.states[0];
-          else selection.closed = selection.open = group.states[0];
+          else if (group.type === 'face') selection.face = group.states[0];
         }
       }
     }
@@ -427,7 +427,7 @@ export class CharacterRenderer {
     const groups = this.face.getCapabilities().groups;
     const next = { ...this.face.getCapabilities().selections };
     for (const group of groups) {
-      for (const slot of group.type === 'eye' ? ['eye'] : ['closed', 'open']) {
+      for (const slot of group.type === 'face' ? ['face'] : group.type === 'eye' ? ['eye'] : ['closed', 'open']) {
         const previous = this.rememberedFace.selections[slot];
         if (group.states.includes(previous)) next[slot] = previous;
       }

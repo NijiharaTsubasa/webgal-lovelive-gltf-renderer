@@ -57,6 +57,25 @@ test('native expressions retain priority over host parameter expression lookup',
     ['parameter-expression', 'anon/sad01'], ['parameter-face', true]]);
 });
 
+test('complete native face releases parameter face ownership and preserves host controls',async()=>{
+  const {actor,calls}=fixture({async resolveExpression(){assert.fail('Complete face is local');}});
+  actor.character.parameterPlayer={};
+  await actor.setExpression('3d:face/Happy%2FSmile');
+  assert.deepEqual(calls,[['parameter-expression',undefined],['parameter-face',false],['expression',{face:'Happy/Smile'}]]);
+});
+
+test('model changes preserve a complete face selection and opening inputs',()=>{
+  let selection={face:'Normal'},blink=0,speech=0;
+  const actor=Object.assign(Object.create(CharacterRenderer.prototype),{
+    faceDefinition:{defaultExpression:{face:'Normal'}},
+    rememberedFace:{selections:{face:'Happy',eye:'Old'},blink:.2,speech:.7},
+    face:{setExpression(value){selection={...value};},setBlink(value){blink=value;},setSpeech(value){speech=value;},
+      getCapabilities(){return {selections:selection,groups:[{name:'emotion',type:'face',states:['Normal','Happy']}]};}},
+  });
+  actor.initializeFace();
+  assert.deepEqual(selection,{face:'Happy'});assert.equal(blink,.2);assert.equal(speech,.7);
+});
+
 test('named preparation uses the injected lookup and cached bytes', async () => {
   const fetched = [];
   await OffscreenCharacter.preloadNamed('https://unused.test/catalog.json', [

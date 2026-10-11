@@ -22,8 +22,8 @@
 | `role` | string | 必需 | `integrated` / `head` / `body` 之一 |
 | `model` | string | 必需 | GLB 相对 `config.json` 的路径；文件名不固定 |
 | `morphPoses` | `MorphPose[]` | 条件必需 | `integrated` 与 `head` 必需；静态形变配方，可为空；`body` 不声明；详见[表情标准](model_expression_spec.md) |
-| `expressionGroups` | `ExpressionGroup[]` | 条件必需 | `integrated` 与 `head` 必需；独立选择的表情分组，可为空；`body` 不声明；详见[表情标准](model_expression_spec.md) |
-| `defaultExpression` | ExpressionSelection | 可选 | 默认眼型、闭口与张口组合；详见[表情标准](model_expression_spec.md) |
+| `expressionGroups` | `ExpressionGroup[]` | 条件必需 | `integrated` 与 `head` 必需；独立眼口或完整脸部的表情分组，可为空；`body` 不声明；详见[表情标准](model_expression_spec.md) |
+| `defaultExpression` | ExpressionSelection | 可选 | 默认独立眼口组合或完整脸部状态；详见[表情标准](model_expression_spec.md) |
 | `defaultMotion` | string | 可选 | 默认展示的动作资源标识；可用时按该动作自身的程序播放 |
 | `idlePose` | object | 可选 | 无动作时展示的单帧标准 Humanoid 姿态；见 §1.5 |
 | `humanoidScale` | number | 必需 | 当前 GLB 的静态人体尺度，必须为正有限数；供标准动作恢复 `Hips` 位移 |

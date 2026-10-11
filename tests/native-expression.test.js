@@ -5,6 +5,13 @@ import { ExpressionController, registerExpressionNodes } from "../src/expression
 import { formatNativeExpression, parseNativeExpression, isNativeExpression } from "../src/native-expression.js";
 import { validateExpressionDefinitions } from "../src/model-manifest.js";
 
+test("complete face native selection round trips without confusing independent eye names",()=>{
+  const selection={face:"happy/喜び%"};
+  assert.deepEqual(parseNativeExpression(formatNativeExpression(selection)),selection);
+  assert.deepEqual(parseNativeExpression("3d:face//"),{eye:"face"});
+  assert.throws(()=>formatNativeExpression({face:"happy",closed:"N"}),/不能与独立眼口组合/);
+});
+
 function fixture() {
   const root = new THREE.Group();
   const face = new THREE.Object3D();

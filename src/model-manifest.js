@@ -70,7 +70,7 @@ export function validateExpressionDefinitions(definition, source = "expressions"
   const stateNames = new Map();
   const types = new Map();
   for (const group of groups.values()) {
-    if (!["eye", "mouth"].includes(group.type)) fail(source, "表情分组 type 必须是 eye 或 mouth");
+    if (!["eye", "mouth", "face"].includes(group.type)) fail(source, "表情分组 type 必须是 eye、mouth 或 face");
     if (types.has(group.type)) fail(source, `重复表情用途 ${group.type}`);
     const states = namedEntries(group.states, `${source}.${group.name}.states`, true);
     types.set(group.type, states);
@@ -80,9 +80,10 @@ export function validateExpressionDefinitions(definition, source = "expressions"
       weights(state.poses, `${label}.poses`);
       if (state.controls === undefined) continue;
       if (!isObject(state.controls)) fail(label, "controls 必须是对象");
-      for (const key of ["blink"]) {
+      for (const key of ["blink", "speech"]) {
         if (state.controls[key] !== undefined) weights(state.controls[key], `${label}.${key}`);
       }
+      if (state.controls.speech !== undefined && group.type !== "face") fail(label, "speech 仅用于 face 分组");
       if (state.controls.visemes !== undefined) {
         if (!isObject(state.controls.visemes)) fail(label, "visemes 必须是对象");
         for (const [name, endpoint] of Object.entries(state.controls.visemes)) {
@@ -91,7 +92,7 @@ export function validateExpressionDefinitions(definition, source = "expressions"
         }
       }
       const blink = changedMorphs(state.poses, state.controls.blink, label);
-      for (const endpoint of Object.values(state.controls.visemes || {})) {
+      for (const endpoint of [...Object.values(state.controls.visemes || {}), ...(state.controls.speech ? [state.controls.speech] : [])]) {
         const mouth = changedMorphs(state.poses, endpoint, label);
         for (const [key, value] of blink) {
           if (value !== 0 && (mouth.get(key) || 0) !== 0) fail(label, "blink 与嘴部控制不能改变同一实际 Morph");
@@ -101,6 +102,14 @@ export function validateExpressionDefinitions(definition, source = "expressions"
   }
   const eyeStates = types.get("eye");
   const mouthStates = types.get("mouth");
+  if (types.has("face") && (eyeStates || mouthStates)) fail(source, "face 不能与 eye 或 mouth 共存");
+  for (const state of eyeStates?.values() ?? []) {
+    if (state.mouth === undefined) continue;
+    if (!isObject(state.mouth)) fail(source, "mouth 必须是配套口型对象");
+    for (const key of ["closed", "open"]) {
+      if (!mouthStates?.has(state.mouth[key])) fail(source, `mouth.${key} 必须引用 mouth 状态`);
+    }
+  }
   if (eyeStates && mouthStates) {
     const base = mouthStates.values().next().value.poses;
     const fullEndpoint = (target) => Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(target)])]
@@ -122,8 +131,8 @@ export function validateExpressionDefinitions(definition, source = "expressions"
   }
   if (definition.defaultExpression !== undefined) {
     if (!isObject(definition.defaultExpression)) fail(source, "defaultExpression 必须是组合对象");
-    for (const [key, type] of [["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
-      if (types.has(type) && !types.get(type).has(definition.defaultExpression[key])) {
+    for (const [key, type] of [["face", "face"], ["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
+      if (types.has(type) && ((key === "eye" || key === "face") || definition.defaultExpression[key] !== undefined) && !types.get(type).has(definition.defaultExpression[key])) {
         fail(source, `defaultExpression.${key} 必须引用 ${type} 状态`);
       }
       if (!types.has(type) && definition.defaultExpression[key] !== undefined) fail(source, `${key} 没有对应分组`);

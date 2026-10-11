@@ -41,6 +41,72 @@ function definition() {
 }
 const SAD={eye:"Joy",closed:"Sad",open:"A"};
 const FIXED={eye:"Fixed",closed:"Neutral",open:"SoftA"};
+function faceDefinition() {
+  const d=definition();
+  d.expressionGroups=[{name:"emotions",type:"face",states:[
+    {name:"Happy",poses:{joy:1,sad:1},controls:{blink:{joy:0,close:1},speech:{sad:0,a:1},visemes:{i:{sad:0,i:1}}}},
+    {name:"Fixed",poses:{close:1,sad:.5}},
+  ]}];
+  d.defaultExpression={face:"Happy"};
+  return d;
+}
+
+test("complete face uses one base and independent sparse blink/speech targets",()=>{
+  const {root,face}=fixture();const c=new ExpressionController(root,faceDefinition());
+  c.setBlink(.25);c.setSpeech(.6);c.update();
+  close(face.morphTargetInfluences.slice(0,5),[.75,.25,.4,.6,0]);
+  assert.deepEqual(c.getCapabilities().selections,{face:"Happy"});
+  assert.equal(c.getCapabilities().speech,true);
+  c.setVisemes({i:.4});c.update();
+  close(face.morphTargetInfluences.slice(0,5),[.75,.25,.6,0,.4]);
+  c.setSpeech(.6);c.update();c.setExpression({face:"Fixed"},1);c.update(.5);
+  close(face.morphTargetInfluences.slice(0,5),[.375,.625,.45,.3,0]);
+  c.update(.5);close(face.morphTargetInfluences.slice(0,5),[0,1,.5,0,0]);
+  assert.equal(c.getCapabilities().speech,false);
+  assert.equal(c.getCapabilities().blink,false);
+  assert.throws(()=>c.setExpression({face:"Happy",eye:"Joy"}),/没有对应分组/);
+  c.setActive(false);c.beginFrame();face.morphTargetInfluences[0]=.33;c.update();
+  assert.equal(face.morphTargetInfluences[0],.33);
+  c.setActive(true);c.setExpression({face:"Happy"},0);c.update();
+  close(face.morphTargetInfluences.slice(0,5),[.75,.25,.4,.6,0]);
+});
+
+test("eye shorthand resolves paired mouth while explicit selections win",()=>{
+  const {root}=fixture();const d=definition();
+  d.expressionGroups[0].states[0].mouth={closed:"Neutral",open:"SoftA"};
+  d.defaultExpression={eye:"Joy"};
+  const c=new ExpressionController(root,d);
+  assert.deepEqual(c.getCapabilities().selections,{eye:"Joy",closed:"Neutral",open:"SoftA"});
+  assert.deepEqual(c.getCapabilities().mouthDefaults,{Joy:{closed:"Neutral",open:"SoftA"}});
+  c.setExpression({eye:"Joy",open:"A"},0);
+  assert.deepEqual(c.getCapabilities().selections,{eye:"Joy",open:"A",closed:"Neutral"});
+  c.setExpression({eye:"Fixed"},0);
+  assert.deepEqual(c.getCapabilities().selections,{eye:"Fixed",closed:"Sad",open:"Sad"});
+});
+
+test("face exclusivity, paired references and sparse controls are validated",()=>{
+  const {root}=fixture();let d=faceDefinition();
+  d.expressionGroups.push(definition().expressionGroups[0]);
+  assert.throws(()=>new ExpressionController(root,d),/不能与 eye 或 mouth 共存/);
+  d=faceDefinition();d.expressionGroups[0].states[0].controls.speech={missing:1};
+  assert.throws(()=>new ExpressionController(root,d),/未知 Morph 配方/);
+  d=faceDefinition();d.expressionGroups[0].states[0].controls.speech={joy:0};
+  assert.throws(()=>new ExpressionController(root,d),/同一实际 Morph/);
+  d=definition();d.expressionGroups[0].states[0].mouth={closed:"Missing",open:"A"};
+  assert.throws(()=>new ExpressionController(root,d),/mouth.closed/);
+});
+
+test("complete face can open by withdrawing an authored correction and defaults to first state",()=>{
+  const {root,face}=fixture();const d=faceDefinition();delete d.defaultExpression;
+  d.expressionGroups[0].states[0]={name:"Happy",poses:{joy:1,a:1,sad:1},controls:{speech:{sad:0}}};
+  const c=new ExpressionController(root,d);
+  c.update();close(face.morphTargetInfluences.slice(0,5),[1,0,1,1,0]);
+  c.setSpeech(.35);c.update();close(face.morphTargetInfluences.slice(0,5),[1,0,.65,1,0]);
+  c.setSpeech(1);c.update();close(face.morphTargetInfluences.slice(0,5),[1,0,0,1,0]);
+  c.setExpression({},0);assert.deepEqual(c.getCapabilities().selections,{face:"Happy"});
+  d.defaultExpression={face:"Missing"};
+  assert.throws(()=>new ExpressionController(root,d),/defaultExpression.face/);
+});
 function close(actual, expected) {
   actual.forEach((value, index) => assert.ok(Math.abs(value-expected[index])<1e-12, `${index}: ${value} != ${expected[index]}`));
 }

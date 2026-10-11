@@ -45,7 +45,7 @@ export class OffscreenCharacter {
   canvas: HTMLCanvasElement;
   setMotion(name: string): Promise<void>;
   setFocus(value: { x?: number; y?: number; instant?: boolean }): void;
-  /** Native: 3d:<encoded eye>/<encoded closed>/<encoded open>; empty selects the model default. */
+  /** Native: 3d:<encoded eye>/<encoded closed>/<encoded open> or 3d:face/<encoded face>; empty selects the model default. */
   setExpression(name: string): Promise<void>;
   /** Flush pending state and prepare rendering while the host freezes the actor's ticker. */
   prepare(): Promise<void>;

@@ -102,7 +102,7 @@ export class ExpressionController {
         const controls = state.controls || {};
         for (const name of Object.keys(controls.visemes || {})) this.validVisemes.add(name);
         const blink = this.expandWeights(this.endpointDelta(state.poses, controls.blink));
-        for (const endpoint of Object.values(controls.visemes || {})) {
+        for (const endpoint of [...Object.values(controls.visemes || {}), ...(controls.speech ? [controls.speech] : [])]) {
           const mouth = this.expandWeights(this.endpointDelta(state.poses, endpoint));
           for (const [key, value] of blink) {
             if (value !== 0 && (mouth.get(key) || 0) !== 0) throw new Error(`blink 与嘴部控制改变同一实际 Morph: ${groupName}/${state.name}`);
@@ -166,12 +166,23 @@ export class ExpressionController {
   startTransition(duration) {
     finite(duration, "表情过渡时间");
     if (duration < 0) throw new Error("表情过渡时间必须非负");
+    if (duration === 0 || !this.active) { this.transition = null; return; }
     const from = this.renderedWeights === null ? this.evaluateWeights() : this.renderedWeights;
     this.transition = duration === 0 || !this.active ? null : { from: new Map(from), elapsed: 0, duration };
   }
   setExpression(selection, duration = DEFAULT_TRANSITION_SECONDS) {
     object(selection, "表情组合");
-    for (const [key, type] of [["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
+    selection = { ...selection };
+    const eyeStates = this.groupsByType.get("eye");
+    const mouthStates = this.groupsByType.get("mouth");
+    const faceStates = this.groupsByType.get("face");
+    if (faceStates && selection.face === undefined) selection.face = faceStates.keys().next().value;
+    if (eyeStates && selection.eye === undefined) selection.eye = eyeStates.keys().next().value;
+    const paired = eyeStates?.get(selection.eye)?.mouth;
+    if (mouthStates) {
+      for (const key of ["closed", "open"]) selection[key] ??= paired?.[key] ?? mouthStates.keys().next().value;
+    }
+    for (const [key, type] of [["face", "face"], ["eye", "eye"], ["closed", "mouth"], ["open", "mouth"]]) {
       const states = this.groupsByType.get(type);
       if (states && !states.has(selection[key])) throw new Error(`未知 ${key} 状态 ${selection[key]}`);
       if (!states && selection[key] !== undefined) throw new Error(`${key} 没有对应分组`);
@@ -218,6 +229,7 @@ export class ExpressionController {
     const selection = {};
     for (const [type, states] of this.groupsByType) {
       if (type === "eye") selection.eye = states.keys().next().value;
+      else if (type === "face") selection.face = states.keys().next().value;
       else selection.closed = selection.open = states.keys().next().value;
     }
     this.selections = new Map(Object.entries(selection));
@@ -226,7 +238,9 @@ export class ExpressionController {
     this.blink = 0;
     this.speech = 0;
     this.visemes = null;
-    this.setExpression(this.definition.defaultExpression ?? selection, 0);
+    const first = this.groupsByType.has("face") ? {face:selection.face}
+      : this.groupsByType.has("eye") ? {eye:selection.eye} : selection;
+    this.setExpression(this.definition.defaultExpression ?? first, 0);
     return true;
   }
   getCapabilities() {
@@ -235,12 +249,14 @@ export class ExpressionController {
     const visemes = new Set();
     const eye = this.groupsByType.get("eye")?.get(this.selections.get("eye"));
     const mouth = this.groupsByType.get("mouth")?.get(this.selections.get("open"));
-    blink = eye?.controls?.blink !== undefined;
-    speech = this.groupsByType.has("mouth");
-    for (const name of Object.keys(mouth?.controls?.visemes || {})) visemes.add(name);
+    const face = this.groupsByType.get("face")?.get(this.selections.get("face"));
+    blink = (face ?? eye)?.controls?.blink !== undefined;
+    speech = face ? face.controls?.speech !== undefined : this.groupsByType.has("mouth");
+    for (const name of Object.keys((face ?? mouth)?.controls?.visemes || {})) visemes.add(name);
     return {
       blink, speech, visemes: [...visemes].sort(), validVisemes: [...this.validVisemes].sort(),
       groups: this.definition.expressionGroups.map(({name, type}) => ({name, type, states: [...this.groups.get(name).keys()]})),
+      mouthDefaults: Object.fromEntries([...this.groupsByType.get("eye")?.values() ?? []].filter(state => state.mouth).map(state => [state.name, { ...state.mouth }])),
       selections: Object.fromEntries(this.selections),
     };
   }
@@ -263,6 +279,18 @@ export class ExpressionController {
       for (const name of Object.keys(poses || {}).sort()) add(weights, name, poses[name] * amount);
     };
     const eye = this.groupsByType.get("eye")?.get(this.selections.get("eye"));
+    const face = this.groupsByType.get("face")?.get(this.selections.get("face"));
+    if (face) {
+      contribute(face.poses, 1);
+      for (const [name, delta] of this.endpointDelta(face.poses, face.controls?.blink)) add(weights, name, delta * this.blink);
+      if (this.visemes === null) {
+        for (const [name, delta] of this.endpointDelta(face.poses, face.controls?.speech)) add(weights, name, delta * this.speech);
+      } else {
+        for (const [viseme, amount] of Object.entries(this.visemes)) {
+          for (const [name, delta] of this.endpointDelta(face.poses, face.controls?.visemes?.[viseme])) add(weights, name, delta * amount);
+        }
+      }
+    }
     if (eye) {
       contribute(eye.poses, 1);
       for (const [name, delta] of this.endpointDelta(eye.poses, eye.controls?.blink)) add(weights, name, delta * this.blink);
