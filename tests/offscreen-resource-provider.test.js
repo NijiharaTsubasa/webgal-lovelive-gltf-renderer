@@ -45,6 +45,44 @@ test('an absent default motion retains the static pose', async () => {
   assert.deepEqual(calls, [['motion', undefined, undefined]]);
 });
 
+test('default motion lookup and payload failures fall back, while explicit failures reject', async t => {
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  t.after(() => { console.warn = originalWarn; });
+  for (const phase of ['lookup', 'motion', 'garupa-motion']) {
+    const failure = new Error(`404 ${phase}`);
+    const { actor, calls } = fixture({ async resolveMotion(name) {
+      if (phase === 'lookup') throw failure;
+      return entry(phase, name);
+    } });
+    const select = actor.character.selectMotion;
+    actor.character.selectMotion = async (value, url) => {
+      if (value) throw failure;
+      return select(value, url);
+    };
+    actor.character.selectParameterMotion = async () => { throw failure; };
+    await actor.setMotion('');
+    assert.deepEqual(calls, [['motion', undefined, undefined]]);
+    await assert.rejects(actor.setMotion('explicit'), error => error === failure);
+  }
+  assert.equal(warnings.length, 3);
+});
+
+test('a late default motion failure cannot clear a newer explicit selection', async () => {
+  let rejectDefault;
+  const { actor, calls } = fixture({ resolveMotion(name) {
+    if (name === 'idle') return new Promise((resolve, reject) => { rejectDefault = reject; });
+    return Promise.resolve(entry('motion', name));
+  } });
+  const pending = actor.setMotion('');
+  await actor.setMotion('chosen.motionbin');
+  rejectDefault(new Error('503 default motion'));
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1], 'chosen.motionbin');
+});
+
 test('native expressions retain priority over host parameter expression lookup', async () => {
   const queried = [];
   const { actor, calls } = fixture({ async resolveExpression(name) {

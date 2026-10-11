@@ -97,6 +97,23 @@ test('default motion falls back to static pose, while explicit missing motions s
   await assert.rejects(OffscreenCharacter.prototype.setMotion.call(actor, 'explicit-missing'), /Resource not found/);
 });
 
+test('model dependencies exclude an indexed default motion with a missing payload', async () => {
+  const { catalog } = fixture();
+  await catalog.load();
+  const json = new TextEncoder().encode(JSON.stringify({ materials: [] }));
+  const glb = new ArrayBuffer(20 + json.length);
+  const view = new DataView(glb);
+  view.setUint32(0, 0x46546c67, true);
+  view.setUint32(12, json.length, true);
+  new Uint8Array(glb, 20).set(json);
+  catalog.fetch = async url => {
+    assert.equal(url, 'https://game.test/model/model.glb');
+    return glb;
+  };
+  await catalog.preloadModelDependencies({ config: 'https://game.test/model/config.json',
+    component: { model: 'model.glb', defaultMotion: 'idle' } });
+});
+
 function behaviorDependencies({ indexed = false, available = false } = {}) {
   const json = new TextEncoder().encode(JSON.stringify({ materials: [] }));
   const glb = new ArrayBuffer(20 + json.length);

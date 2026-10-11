@@ -111,9 +111,6 @@ export class HostResourceCatalog {
     const gltf = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes, 20, length)));
     const names = new Set((gltf.materials ?? []).map(material => material.extras?.shader).filter(Boolean));
     const dependencies = [...names].map(name => ['shader', name]);
-    const defaultMotion = this.find('motion', model.component.defaultMotion)
-      ?? this.find('garupa-motion', model.component.defaultMotion);
-    if (defaultMotion) dependencies.push([defaultMotion.type, defaultMotion.name]);
     for (const [type, name] of dependencies) await this.preload(type, name);
     for (const behavior of model.component.behaviors ?? []) {
       try {

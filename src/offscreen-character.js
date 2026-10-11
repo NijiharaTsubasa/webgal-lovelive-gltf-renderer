@@ -167,19 +167,26 @@ export class OffscreenCharacter {
     const useDefault = !name;
     if (!name) name = this.character.config?.defaultMotion ?? '';
     if (!name) { await this.character.selectMotion(null); return; }
-    let entry;
-    if (this.catalog.resolveMotion) {
-      entry = await this.catalog.resolveMotion(name, { optional: useDefault });
-    } else {
-      const indexed = this.catalog.find('motion', name) ?? this.catalog.find('garupa-motion', name);
-      if (indexed) entry = await this.catalog.resolve(indexed);
-      else if (!useDefault) entry = await this.catalog.resolve(indexed);
+    try {
+      let entry;
+      if (this.catalog.resolveMotion) {
+        entry = await this.catalog.resolveMotion(name, { optional: useDefault });
+      } else {
+        const indexed = this.catalog.find('motion', name) ?? this.catalog.find('garupa-motion', name);
+        if (indexed) entry = await this.catalog.resolve(indexed);
+        else if (!useDefault) entry = await this.catalog.resolve(indexed);
+      }
+      if (this.disposed || generation !== this.motionGeneration) return;
+      if (!entry) { await this.character.selectMotion(null); return; }
+      const url = new URL(entry.component.src, entry.config).href;
+      if (entry.type === 'motion') await this.character.selectMotion(entry, url);
+      else await this.character.selectParameterMotion(entry, url);
+    } catch (error) {
+      if (this.disposed || generation !== this.motionGeneration) return;
+      if (!useDefault) throw error;
+      console.warn(`Default motion "${name}" could not be loaded; using static pose.`, error);
+      await this.character.selectMotion(null);
     }
-    if (this.disposed || generation !== this.motionGeneration) return;
-    if (!entry) { await this.character.selectMotion(null); return; }
-    const url = new URL(entry.component.src, entry.config).href;
-    if (entry.type === 'motion') await this.character.selectMotion(entry, url);
-    else await this.character.selectParameterMotion(entry, url);
   }
 
   setFocus(value) { this.character.setFocus(value); }
