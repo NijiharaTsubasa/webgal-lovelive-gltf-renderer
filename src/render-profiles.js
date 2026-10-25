@@ -96,6 +96,7 @@ export function createRenderProfileScope(profile, renderer) {
   const roots = new Set();
   const drawState = stateBuffer(), prepareState = stateBuffer();
   let disposed = false;
+  const cancelled = () => disposed;
   let preparing = null;
   const pendingLifecycle = new Set();
   const track = pending => {
@@ -103,7 +104,7 @@ export function createRenderProfileScope(profile, renderer) {
     pending.then(() => pendingLifecycle.delete(pending), () => pendingLifecycle.delete(pending));
     return pending;
   };
-  const frame = (scene, camera, time, delta, state) => ({ scene, camera, time, delta,
+  const frame = (scene, camera, time, delta, state) => ({ scene, camera, time, delta, cancelled,
     target: state.target, viewport: state.frameViewport.copy(state.actualViewport),
     scissor: state.frameScissor.copy(state.actualScissor), scissorTest: state.actualScissorTest });
   return {

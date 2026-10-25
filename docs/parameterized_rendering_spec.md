@@ -32,18 +32,46 @@
 
 | JSON | 推断 GLSL 类型 |
 |------|---------------|
-| number | float |
+| number | 标量；按目标 GLSL uniform 声明绑定 `float`、`int` 或 `uint` |
 | `[x, y]` | vec2 |
 | `[x, y, z]` | vec3 |
 | `[x, y, z, w]` | vec4 |
 
-数组元素数决定推断类型，必须与目标 GLSL uniform 的声明一致；不能通过补零或补一
-改变类型。
+数组元素数决定浮点向量的维数，必须与目标 GLSL uniform 的声明一致；不能通过补零或补一
+改变维数。标量绑定到 `int` 或 `uint` 时，数值必须是对应 32 位范围内的整数。
 
 `textures` 按 slot 名查找，本身没有顺序要求。渲染器按 `samplers[].name` 对应
 GLSL uniform 绑定，不假设特定纹理单元编号或声明顺序。
 
 `textures` 引用的每个 glTF texture 必须在 `texture.extras.colorSpace` 中显式声明采样颜色空间，取值只能是 `"srgb"` 或 `"linear"`。转换器应从源资产纹理元数据保留该语义；渲染端在绑定 custom-shader sampler 前必须应用它。字段缺失或取值未知时必须报告错误，不能依赖宿主引擎按纹理用途猜测。此字段描述纹理样本的解码方式，不改变 `shaderParams` 中数值和颜色 uniform 的线性值约定。
+
+`texture.extras.anisotropy` 可选，表示请求的各向异性过滤等级，必须为 ≥1 的正安全整数，缺省为 1。普通图片绑定和 `rawMipChain` 绑定均使用该值，不能从图片 extras 或宿主默认值反推。宿主 GPU 的各向异性过滤上限必须满足请求，否则须报错，不能静默裁剪到较低等级。此字段保留源采样状态，不要求不同 GPU 的合法滤波实现逐 bit 相同。
+
+需要保留已有像素及 mip 时，glTF texture 可以声明可选字段：
+
+```json
+{
+  "extras": {
+    "colorSpace": "linear",
+    "rawMipChain": {
+      "format": "rgba16f",
+      "compression": "deflate",
+      "levels": [
+        { "bufferView": 12, "width": 2, "height": 2 },
+        { "bufferView": 13, "width": 1, "height": 1 }
+      ]
+    }
+  }
+}
+```
+
+`rawMipChain` 仅用于 custom shader 的 `sampler2D` 绑定；普通 glTF/PBR 图片引用仍保持原有含义。`levels` 必须包含第 0 级，按连续 mip 顺序排列，每级宽高分别为前一级除以 2 后向下取整且不小于 1；到达 1×1 后不得再附加级。各级引用的 `bufferView` 必须在其 buffer 范围内、无 `byteStride`，解码后的像素无行填充、字节长度精确等于宽×高×每像素字节数。行由上至下、像素由左至右，通道顺序 RGBA，与既有 glTF PNG 绑定使用相同 UV/行方向（`flipY=false`）。
+
+`compression` 可省略，省略时各 `bufferView` 直接存放上述像素字节。唯一允许的显式值为 `"deflate"`：每个 level 的 `bufferView` 分别保存完整的 zlib 包装 DEFLATE 数据流（含 zlib 头及校验，不是 raw DEFLATE 或 gzip），其 `byteLength` 是压缩后的长度，解压后必须精确得到该级的全部像素字节。宿主使用原生 `DecompressionStream('deflate')` 无损解压；损坏数据流、截断、输出不足或多余字节、未知 compression 或环境不支持原生解压时必须报错，不得回退图片。压缩仅影响存储和传输，不能改变任何像素、mip、颜色空间或采样状态。
+
+`format` 只能为 `rgba8`（每通道无符号 8 位，共 4 字节）或 `rgba16f`（每通道 IEEE 754 binary16 小端序，共 8 字节）。`colorSpace=srgb` 只允许 `rgba8`；`colorSpace=linear` 允许两种格式。binary16 按原始位模式上传，不先量化到 PNG 或转换成 RGBA8。颜色空间解码仍由 `colorSpace` 控制。
+
+此字段存在时，custom sampler 直接读取各 `bufferView` 创建独立纹理绑定，保留 glTF texture 指向的 sampler 的 `wrapS`、`wrapT`、`magFilter`、`minFilter`；未指定的采样字段沿用 glTF 默认值。禁用自动生成 mip，不重新滤波；使用 mipmap minFilter（9984–9987，包括默认值）时必须提供连续完整链直到 1×1，否则报错。使用非 mipmap minFilter 时允许只提供第 0 级或已有连续部分链。字段非法或数据不足时必须报错，不能回退图片或重建缺失级。`sampler2DArray` 不接受带此字段的层，必须报错；不得通过 Canvas 重新抽取第 0 级而丢失数据。没有此字段的纹理保持既有加载和绑定行为。
 
 `sampler2DArray` 的 slot 值按索引数组顺序对应 GLSL 层号 0、1、……。每层都是普通 glTF texture；层数必须非零，各层尺寸、颜色空间和采样设置必须一致。渲染端按层顺序组装二维数组纹理，不能改用二维 atlas 或只取首层。索引非法、层数据不一致或宿主不支持数组纹理时必须报错。`sampler2D` 仍只接受单个索引，数组值不得自动降级。
 
@@ -128,7 +156,7 @@ Shader Pass 默认 renderState
 - `zTest`: 借用 Unity `CompareFunction` 数值（0=Disabled, 1=Never, 2=Less, 3=Equal, 4=LessEqual, 5=Greater, 6=NotEqual, 7=GreaterEqual, 8=Always）
 - `blend.srcRgb/dstRgb/srcAlpha/dstAlpha`: 借用 Unity `BlendMode` 数值（0=Zero, 1=One, 2=DstColor, 3=SrcColor, 4=OneMinusDstColor, 5=SrcAlpha, 6=OneMinusSrcColor, 7=DstAlpha, 8=OneMinusDstAlpha, 9=SrcAlphaSaturate, 10=OneMinusSrcAlpha）
 - `blend.opRgb/opAlpha`: 借用 Unity `BlendOp` 数值（0=Add, 1=Subtract, 2=ReverseSubtract, 3=Min, 4=Max）
-- `stencil.comp`: 同 `zTest`
+- `stencil.comp`: 同 `zTest`；`0=Disabled` 关闭整个模板测试及模板写入，其他值启用测试并按 `pass/fail/zFail` 执行操作。
 - `stencil.pass/fail/zFail`: 借用 Unity `StencilOp` 数值（0=Keep, 1=Zero, 2=Replace, 3=IncrementSaturate, 4=DecrementSaturate, 5=Invert, 6=IncrementWrap, 7=DecrementWrap）
 - `colorMask`: 借用 Unity `ColorWriteMask` 位标志：`0=None, 1=Alpha, 2=Blue, 4=Green, 8=Red, 15=All`。其他取值按位或组合（`3=Blue|Alpha, 5=Green|Alpha, 6=Green|Blue, 7=Green|Blue|Alpha, 9=Red|Alpha, 10=Red|Blue, 11=Red|Blue|Alpha, 12=Red|Green, 13=Red|Green|Alpha, 14=Red|Green|Blue`）。
 
@@ -402,7 +430,7 @@ Shader 私有的逐 Pass 数据可放在 `passes[].extras`，通用渲染器不�
 模块导出工厂：
 
 ```javascript
-export function createRenderProfile({ THREE, renderer, createPassMaterial }) {
+export function createRenderProfile({ THREE, renderer, createPassMaterial, parts }) {
   return {
     attach(characterRoot) {},
     detach(characterRoot) {},
@@ -417,6 +445,8 @@ export function createRenderProfile({ THREE, renderer, createPassMaterial }) {
 
 工厂中的 `THREE` 和 `renderer` 是宿主实际使用的实例。`createPassMaterial(sourceMaterial, passId, mesh)` 返回 `Promise<THREE.Material>`：从源材质的 Shader 声明中选择指定 Pass，合并参数、纹理与渲染状态，注入 sections、绑定 sampler，并执行 Shader Runtime 的 `configurePass`。可选择 Shader 声明中的辅助 Pass。此工厂只建立材质，绘制对象由配置包组织。工厂创建的材质由宿主管理释放。
 
+`parts` 提供当前角色的部件上下文：每项包含 `role`、`component`、`gltf`、`root`、`nodesByName`，以及组合后可用的 `nodeBindings`。配置包可只读这些引用，建立一次性的源节点到实际节点绑定。`nodeBindings` 将组合前节点映射为 `{ node, localMatrix }`；原节点的等价世界矩阵为 `node.matrixWorld * localMatrix`，因此被合并的头部标准骨仍可准确承载附加数据。配置包不得修改共享映射、被移除的骨架或部件所有权；资源生命周期仍由宿主管理。
+
 ### 4.3 帧输入与绘制所有权
 
 `prepare` 与 `render` 使用相同的帧输入：
@@ -425,11 +455,14 @@ export function createRenderProfile({ THREE, renderer, createPassMaterial }) {
 {
   scene, camera,
   time, delta,
-  target, viewport, scissor, scissorTest
+  target, viewport, scissor, scissorTest,
+  cancelled
 }
 ```
 
 `time` 与 `delta` 的单位为秒，由宿主播放时钟提供。暂停与预热期间按宿主的时钟状态取值。`target` 为本帧输出 RenderTarget，`null` 表示默认帧缓冲；`viewport`、`scissor` 为当前绘制目标上的物理像素矩形，`scissorTest` 表示裁剪是否启用。
+
+`cancelled()` 返回当前配置包实例是否已被宿主取消或释放。异步 `prepare` 在开始资源访问及每次异步等待后调用它；返回 `true` 时停止访问角色、材质和 Shader Runtime，结束准备。配置包自己拥有的资源仍在 `destroy` 中释放。
 
 每次绘制调用只启用一个配置包。一个 renderer 可以保留多个配置包实例，并在不同绘制调用中选择相应实例。宿主每帧更新 Shader Runtime 后调用配置包的 `render`，由配置包完成这一帧的角色输出。
 

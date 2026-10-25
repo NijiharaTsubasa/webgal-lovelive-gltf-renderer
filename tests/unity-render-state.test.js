@@ -8,6 +8,19 @@ import {
   unityColorMaskToChannels,
 } from "../src/unity-render-state.js";
 
+test("Unity disabled stencil turns off the complete test and a later pass can re-enable it", () => {
+  const material = new THREE.MeshBasicMaterial();
+  applyRenderState(material, { stencil: { comp: 8, ref: 37, pass: 2 } });
+  assert.equal(material.stencilWrite, true);
+  applyRenderState(material, { stencil: { comp: 0, ref: 19, pass: 2 } });
+  assert.equal(material.stencilWrite, false);
+  assert.equal(material.clone().stencilWrite, false);
+  applyRenderState(material, { stencil: { comp: 3, ref: 19, pass: 0 } });
+  assert.equal(material.stencilWrite, true);
+  assert.equal(material.stencilFunc, THREE.EqualStencilFunc);
+  assert.equal(material.stencilZPass, THREE.KeepStencilOp);
+});
+
 test("Unity stencil operations reach the fields consumed by Three and survive cloning", () => {
   const operations = [THREE.KeepStencilOp, THREE.ZeroStencilOp, THREE.ReplaceStencilOp,
     THREE.IncrementStencilOp, THREE.DecrementStencilOp, THREE.InvertStencilOp,

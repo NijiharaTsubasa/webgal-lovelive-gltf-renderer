@@ -339,6 +339,13 @@ export class CharacterRenderer {
       let renderProfileScope;
       let committed = false;
       try {
+        // Composition moves head meshes into the body tree. Keep each
+        // original mesh's parser ownership before that move: texture indices
+        // are local to its GLB, even after both parts share one skeleton.
+        const shaderMeshOwners = new Map();
+        parts.forEach((part, index) => {
+          part.root.traverse(node => { if (node.isMesh) shaderMeshOwners.set(node, index); });
+        });
         if (composed) {
           composition = composeHumanoidHeadBody(root, parts[0].root);
           parts[0].nodeBindings = composition.nodeBindings;
@@ -354,14 +361,29 @@ export class CharacterRenderer {
         if (generation !== this.generation) return null;
         shaderScope = shaders.createShaderRuntimeScope(this.renderer, this.resourcePackages.shaders);
         this.shaderScope = shaderScope;
-        for (const part of parts) {
-          await shaderScope.applyCustomShaders(part.gltf, part.root);
+        // Behavior initialization can add, remove or reparent meshes. Discover
+        // the surviving trees now; keep original parser ownership for loaded
+        // meshes, while new helpers retain the historical part-root parser.
+        // A detached part root can still own helpers, and nested roots must
+        // never cause the same mesh to be initialized twice.
+        const shaderMeshes = parts.map(() => []), visitedShaderMeshes = new Set();
+        parts.forEach((part, index) => {
+          part.root.traverse(node => {
+            if (!node.isMesh || visitedShaderMeshes.has(node)) return;
+            visitedShaderMeshes.add(node);
+            shaderMeshes[shaderMeshOwners.get(node) ?? index].push(node);
+          });
+        });
+        for (const [index, part] of parts.entries()) {
+          await shaderScope.applyCustomShaders(part.gltf, {
+            traverse(visitor) { for (const mesh of shaderMeshes[index]) visitor(mesh); },
+          });
           if (generation !== this.generation) return null;
         }
         if (body.component.renderProfile !== undefined) {
           const factory = await this.resourcePackages.renderProfiles.load(body.component.renderProfile, this.resourcePackages.shaders);
           if (generation !== this.generation) return null;
-          const profile = factory({ THREE, renderer: this.renderer, createPassMaterial: shaderScope.createPassMaterial });
+          const profile = factory({ THREE, renderer: this.renderer, createPassMaterial: shaderScope.createPassMaterial, parts });
           try { renderProfileScope = createRenderProfileScope(profile, this.renderer); }
           catch (error) { profile?.destroy?.(); throw error; }
           await renderProfileScope.attach(root);

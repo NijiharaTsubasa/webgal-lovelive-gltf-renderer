@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { CharacterResourceOwner } from "./character-resource-owner.js";
 import { registerCompiledUniforms } from "./texture-preparation.js";
+import { hasRawMipChain, textureAnisotropy } from "./raw-mip-texture.js";
 import { applyRenderQueue } from "./render-order.js";
 import {
   createGltfTextureBinding,
@@ -454,13 +455,22 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
       throw new Error(`Invalid glTF texture index: ${String(index)}`);
     }
     if (!textureBindings.has(index)) {
-      textureBindings.set(index, Promise.resolve(parser.getDependency("texture", index)).then(
-        (texture) => {
+      const definition = parser.json?.textures?.[index];
+      const anisotropy = textureAnisotropy(definition);
+      if (anisotropy > 1) {
+        const capabilities = rendererInstance?.capabilities;
+        const maximum = typeof capabilities?.getMaxAnisotropy === "function" ? capabilities.getMaxAnisotropy() : null;
+        if (!Number.isFinite(maximum) || maximum < anisotropy) {
+          throw new Error(`glTF texture ${index}: requested anisotropy ${anisotropy} exceeds host capability ${maximum ?? "unavailable"}`);
+        }
+      }
+      const pending = hasRawMipChain(definition)
+        ? createGltfTextureBinding(null, definition, parser)
+        : Promise.resolve(parser.getDependency("texture", index)).then(texture => {
           scope.resources?.add(texture);
-          return scope.resources?.add(createGltfTextureBinding(texture, parser.json?.textures?.[index]))
-            ?? createGltfTextureBinding(texture, parser.json?.textures?.[index]);
-        },
-      ));
+          return createGltfTextureBinding(texture, definition);
+        });
+      textureBindings.set(index, Promise.resolve(pending).then(binding => scope.resources?.add(binding) ?? binding));
     }
     return textureBindings.get(index);
   };

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { createRawMipTextureBinding, hasRawMipChain, textureAnisotropy } from "./raw-mip-texture.js";
 
 const SUPPORTED_SAMPLER_TYPES = new Set(["sampler2D", "sampler2DArray"]);
 const MISSING_BEHAVIORS = new Set(["error", "constant", "resource"]);
@@ -105,6 +106,9 @@ function arrayTexture(layers, context, name) {
   if (!Array.isArray(layers) || layers.length === 0) {
     throw new Error(`${samplerLabel(context, name)}: array texture requires at least one layer`);
   }
+  if (layers.some(layer => hasRawMipChain({ extras: layer?.userData }))) {
+    throw new Error(`${samplerLabel(context, name)}: rawMipChain supports sampler2D only; raw array layers cannot be rebuilt or discarded`);
+  }
   const first = layers[0];
   const colorSpace = first?.userData?.colorSpace;
   if (!TEXTURE_COLOR_SPACES.has(colorSpace)) {
@@ -126,6 +130,7 @@ function arrayTexture(layers, context, name) {
         || layer.userData?.colorSpace !== colorSpace
         || layer.wrapS !== first.wrapS || layer.wrapT !== first.wrapT
         || layer.magFilter !== first.magFilter || layer.minFilter !== first.minFilter
+        || layer.anisotropy !== first.anisotropy
         || layer.generateMipmaps !== first.generateMipmaps) {
       throw new Error(`${samplerLabel(context, name)}: layer ${index} has incompatible texture data`);
     }
@@ -142,6 +147,7 @@ function arrayTexture(layers, context, name) {
   texture.wrapT = first.wrapT;
   texture.magFilter = first.magFilter;
   texture.minFilter = first.minFilter;
+  texture.anisotropy = first.anisotropy;
   texture.generateMipmaps = first.generateMipmaps;
   texture.needsUpdate = true;
   return texture;
@@ -200,11 +206,19 @@ export async function resolveSamplerTextures(
 // contract stores color space on glTF texture.extras because one image may be
 // referenced by textures with different sampling semantics. Clone the cached
 // loader texture per glTF texture entry and make that entry authoritative.
-export function createGltfTextureBinding(texture, textureDef) {
+export function createGltfTextureBinding(texture, textureDef, parser) {
+  if (hasRawMipChain(textureDef)) return createRawMipTextureBinding(parser, textureDef);
+  const anisotropy = textureAnisotropy(textureDef);
   if (!texture?.isTexture) return texture;
 
   const binding = texture.clone();
+  binding.anisotropy = anisotropy;
   binding.userData = { ...(texture.userData || {}) };
+  if (Object.prototype.hasOwnProperty.call(textureDef?.extras || {}, "anisotropy")) {
+    binding.userData.anisotropy = anisotropy;
+  } else {
+    delete binding.userData.anisotropy;
+  }
   if (Object.prototype.hasOwnProperty.call(textureDef?.extras || {}, "colorSpace")) {
     binding.userData.colorSpace = textureDef.extras.colorSpace;
   } else {

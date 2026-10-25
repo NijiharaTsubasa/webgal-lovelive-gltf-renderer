@@ -186,11 +186,13 @@ export function applyRenderState(material, rs) {
 
   if (rs.stencil) {
     const s = rs.stencil;
-    material.stencilWrite = true;
+    // Unity CompareFunction.Disabled disables the complete stencil test.
+    // Three's stencilWrite controls GL_STENCIL_TEST as well as its writes.
+    material.stencilWrite = s.comp !== 0;
     if (s.ref !== undefined) material.stencilRef = s.ref;
     if (s.readMask !== undefined) material.stencilFuncMask = s.readMask;
     if (s.writeMask !== undefined) material.stencilWriteMask = s.writeMask;
-    if (s.comp !== undefined) material.stencilFunc = unityCompareToStencilFunc(s.comp);
+    if (s.comp !== undefined && s.comp !== 0) material.stencilFunc = unityCompareToStencilFunc(s.comp);
     if (s.pass !== undefined) material.stencilZPass = unityStencilOpToThree(s.pass);
     if (s.fail !== undefined) material.stencilFail = unityStencilOpToThree(s.fail);
     if (s.zFail !== undefined) material.stencilZFail = unityStencilOpToThree(s.zFail);

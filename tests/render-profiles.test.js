@@ -109,6 +109,45 @@ test('cancelled asynchronous profile preparation releases resources created afte
   assert.deepEqual(events, ['created', 'detach', 'destroy']);
 });
 
+test('profile frames expose a live scope cancellation signal before and after disposal', async () => {
+  const renderer = rendererFixture(), signals = [];
+  const scope = createRenderProfileScope(profileFixture({
+    prepare(frame) { assert.equal(typeof frame.cancelled, 'function'); signals.push(frame.cancelled); assert.equal(frame.cancelled(), false); },
+    render(frame) { assert.equal(typeof frame.cancelled, 'function'); signals.push(frame.cancelled); assert.equal(frame.cancelled(), false); },
+  }), renderer);
+  await scope.prepare({}, {}, 0, 0); scope.render({}, {}, 0, 0);
+  assert.equal(signals.length, 2);
+  scope.dispose();
+  assert.ok(signals.every(cancelled => cancelled()), 'retained frame signals observe disposal immediately');
+});
+
+test('cancelled asynchronous preparation can stop work and still restores state before deferred cleanup', async () => {
+  const renderer = rendererFixture(), target = renderer.target, events = [];
+  let entered, release, cancelled;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const scope = createRenderProfileScope(profileFixture({
+    async prepare(frame) {
+      cancelled = frame.cancelled;
+      assert.equal(typeof cancelled, 'function');
+      renderer.target = null; renderer.viewport.set(0, 0, 1, 1); renderer.scissor.set(0, 0, 2, 2);
+      renderer.scissorTest = false; renderer.autoClear = false; renderer.color.setRGB(1, 1, 1); renderer.alpha = 0;
+      events.push('entered'); entered(); await gate;
+      if (cancelled()) { events.push('cancelled'); return; }
+      events.push('must-not-draw');
+    },
+    detach() { events.push('detach'); assert.equal(renderer.target, target); },
+    destroy() { events.push('destroy'); },
+  }), renderer);
+  scope.attach({}); const pending = scope.prepare({}, {}, 0, 0);
+  await started; scope.dispose(); assert.equal(cancelled(), true); release(); await pending;
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['entered', 'cancelled', 'detach', 'destroy']);
+  assert.equal(renderer.target, target); assert.deepEqual(renderer.viewport.toArray(), [1, 2, 30, 40]);
+  assert.deepEqual(renderer.scissor.toArray(), [3, 4, 10, 20]); assert.equal(renderer.scissorTest, true);
+  assert.equal(renderer.autoClear, true); assert.deepEqual(renderer.color.toArray(), [.2, .3, .4]); assert.equal(renderer.alpha, .6);
+});
+
 test('asynchronous attachment finishes before cancellation cleanup and restores its renderer state', async () => {
   const renderer = rendererFixture(), target = renderer.target, calls = []; let release;
   const gate = new Promise(resolve => { release = resolve; });
@@ -167,7 +206,9 @@ test('auxiliary pass material shares Shader runtime and resolves metadata withou
 });
 
 test('loading owns profile attachment and clear releases only its own scope', async () => {
-  const calls = [], packages = new ResourcePackages({ loadModule: async () => ({ createRenderProfile() {
+  let profileParts;
+  const calls = [], packages = new ResourcePackages({ loadModule: async () => ({ createRenderProfile({ parts }) {
+    profileParts = parts;
     return profileFixture({ attach(root) { calls.push(['attach', root]); }, detach(root) { calls.push(['detach', root]); }, destroy() { calls.push('destroy'); } });
   } }) });
   packages.register({ components: [{ type: 'render-profile', name: 'fixture', script: 'profile.js', requiredShaders: [] }] }, 'https://example.test/config.json');
@@ -176,6 +217,9 @@ test('loading owns profile attachment and clear releases only its own scope', as
   const actor = new CharacterRenderer({ renderer, scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera(), resourcePackages: packages,
     loader: { async loadAsync() { return { scene: root, parser: { json: { nodes: [] }, associations: new Map() } }; } } });
   await actor.load([{ basePath: '', component: { role: 'integrated', model: 'model.glb', humanoidScale: 1, renderProfile: 'fixture' } }], 'https://example.test/');
+  assert.equal(profileParts, actor.parts);
+  assert.equal(profileParts[0].root, root);
+  assert.equal(profileParts[0].role, 'integrated');
   assert.equal(calls[0][0], 'attach'); assert.equal(calls[0][1], root);
   actor.clear(); assert.deepEqual(calls, [['attach', root], ['detach', root], 'destroy']);
   assert.equal(actor.root, null); assert.equal(actor.renderProfileScope, null);

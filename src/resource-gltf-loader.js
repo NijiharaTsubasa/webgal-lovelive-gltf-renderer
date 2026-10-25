@@ -5,7 +5,9 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 export class ResourceGLTFLoader extends GLTFLoader {
   constructor(fetchResource) {
     super();
-    this.fetchResource = fetchResource;
+    // Host fetch callbacks (including Window.fetch) must keep their call
+    // receiver; invoking them as a loader method changes that receiver.
+    this.fetchResource = (...args) => fetchResource(...args);
   }
 
   async loadAsync(url) {
