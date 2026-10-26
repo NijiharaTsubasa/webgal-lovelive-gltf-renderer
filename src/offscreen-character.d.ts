@@ -5,6 +5,7 @@ export interface HostResourceEntry {
   component: Record<string, any>;
   basePath: string;
   motionGroup?: string;
+  group?: string;
 }
 /** Host-owned resource lookup, shared by preparation and playback. */
 export interface CharacterResourceCatalog {
@@ -12,6 +13,8 @@ export interface CharacterResourceCatalog {
   fetch(url: string, kind?: 'json' | 'bytes'): Promise<any>;
   response(url: string): Promise<Response>;
   model(configUrl: string): Promise<HostResourceEntry>;
+  /** All model parts selected by the host for one character. */
+  models?(configUrl: string): Promise<HostResourceEntry[]>;
   preloadModelDependencies(model: HostResourceEntry): Promise<void>;
   resolveMotion(name: string, options?: { optional?: boolean }): Promise<HostResourceEntry | null | undefined>;
   resolveExpression(name: string, options?: { optional?: boolean }): Promise<HostResourceEntry | null | undefined>;

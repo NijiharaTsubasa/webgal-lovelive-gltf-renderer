@@ -3,6 +3,26 @@ import assert from 'node:assert/strict';
 import { OffscreenCharacter } from '../src/offscreen-character.js';
 import { fetchMotionPayload } from '../src/motion-binary.js';
 import { CharacterRenderer } from '../src/character-renderer.js';
+import * as THREE from 'three';
+
+test('offscreen loading prepares both host-selected model parts before composing one character', async () => {
+  const parts = ['head', 'body'].map(role => ({type:'model',name:role,config:'https://game.test/config.json',
+    basePath:'https://game.test/',component:{role,model:`${role}.glb`}}));
+  const calls=[];
+  const catalog={entries:[],async models(url){calls.push(['models',url]);return parts;},
+    async model(){assert.fail('a composed selection must not be reduced to one model');},
+    async preloadModelDependencies(entry){calls.push(['dependencies',entry.component.role]);}};
+  const actor=Object.assign(Object.create(OffscreenCharacter.prototype),{
+    disposed:false,camera:new THREE.PerspectiveCamera(),
+    character:{resourcePackages:{},config:{group:'garupa'},root:new THREE.Group(),
+      async load(entries){assert.deepEqual(entries,parts);assert.equal(calls.filter(c=>c[0]==='dependencies').length,2);calls.push(['load']);},
+      configureParameterPlayback(){},async initializeFocusAdapter(){}},
+    async setMotion(){},async setExpression(){},async prepare(){calls.push(['prepare']);},
+  });
+  await actor.load({modelUrl:'https://game.test/config.json',resourceCatalog:catalog,framing:{centerY:1,viewHeight:1}});
+  assert.deepEqual(calls.map(c=>c[0]),['models','dependencies','dependencies','load','prepare']);
+  assert.equal(actor.modelUrl,'https://game.test/config.json');
+});
 
 const entry = (type, name) => ({ type, name,
   config: `https://game.test/game/3d/motion/${name}`,

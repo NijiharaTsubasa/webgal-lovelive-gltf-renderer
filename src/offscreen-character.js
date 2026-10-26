@@ -112,12 +112,13 @@ export class OffscreenCharacter {
       if (this.disposed) return;
       this.character.resourcePackages.register(packageConfig, config);
     }
-    const entry = await this.catalog.model(modelUrl);
+    const entries = this.catalog.models
+      ? await this.catalog.models(modelUrl) : [await this.catalog.model(modelUrl)];
     if (this.disposed) return;
-    this.modelUrl = entry.config;
-    await this.catalog.preloadModelDependencies(entry);
+    this.modelUrl = entries[0].config;
+    await Promise.all(entries.map(entry => this.catalog.preloadModelDependencies(entry)));
     if (this.disposed) return;
-    await this.character.load([entry], '');
+    await this.character.load(entries, '');
     if (this.disposed) return;
     const parameterEntries = [];
     const configs = new Set(this.catalog.entries.filter(item => item.type.startsWith('garupa-')).map(item => item.config));
