@@ -1,10 +1,18 @@
 import * as THREE from "three";
-import { createRawMipTextureBinding, hasRawMipChain, textureAnisotropy } from "./raw-mip-texture.js";
 
 const SUPPORTED_SAMPLER_TYPES = new Set(["sampler2D", "sampler2DArray"]);
 const MISSING_BEHAVIORS = new Set(["error", "constant", "resource"]);
 const TEXTURE_COLOR_SPACES = new Set(["linear", "srgb"]);
 const constantTextureCache = new Map();
+
+export function textureAnisotropy(textureDef) {
+  const value = textureDef?.extras?.anisotropy;
+  if (value === undefined) return 1;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error('texture.extras.anisotropy must be a positive safe integer >= 1');
+  }
+  return value;
+}
 
 function samplerLabel(context, name) {
   return `${context ? `${context}: ` : ""}sampler ${name || "<unnamed>"}`;
@@ -106,9 +114,6 @@ function arrayTexture(layers, context, name) {
   if (!Array.isArray(layers) || layers.length === 0) {
     throw new Error(`${samplerLabel(context, name)}: array texture requires at least one layer`);
   }
-  if (layers.some(layer => hasRawMipChain({ extras: layer?.userData }))) {
-    throw new Error(`${samplerLabel(context, name)}: rawMipChain supports sampler2D only; raw array layers cannot be rebuilt or discarded`);
-  }
   const first = layers[0];
   const colorSpace = first?.userData?.colorSpace;
   if (!TEXTURE_COLOR_SPACES.has(colorSpace)) {
@@ -206,8 +211,7 @@ export async function resolveSamplerTextures(
 // contract stores color space on glTF texture.extras because one image may be
 // referenced by textures with different sampling semantics. Clone the cached
 // loader texture per glTF texture entry and make that entry authoritative.
-export function createGltfTextureBinding(texture, textureDef, parser) {
-  if (hasRawMipChain(textureDef)) return createRawMipTextureBinding(parser, textureDef);
+export function createGltfTextureBinding(texture, textureDef) {
   const anisotropy = textureAnisotropy(textureDef);
   if (!texture?.isTexture) return texture;
 
