@@ -324,9 +324,6 @@ function instantiateShaderRuntime(material, rendererArg, preparedShader, mesh, s
   for (const Ctor of classes) {
     const runtime = new Ctor(THREE, rendererArg, material, mesh);
     scope.runtimes.push(runtime);
-    if (typeof runtime.createPass === "function") {
-      throw new Error("Shader runtime must use configurePass() and createPassObjects()");
-    }
     if (typeof runtime.init === "function") runtime.init(rendererArg);
     runtimes.push(runtime);
   }

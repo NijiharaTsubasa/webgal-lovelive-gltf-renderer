@@ -98,23 +98,14 @@ test("body omits facial fields and composed manifests require group", () => {
 });
 
 test("motionGroup is optional but must be a non-empty string when present", () => {
-  const legacy = composedManifest();
-  delete legacy.components[0].motionGroup;
-  delete legacy.components[1].motionGroup;
-  assert.equal(validateModelManifest(legacy), legacy);
+  const manifest = composedManifest();
+  delete manifest.components[0].motionGroup;
+  delete manifest.components[1].motionGroup;
+  assert.equal(validateModelManifest(manifest), manifest);
 
   const invalid = composedManifest();
   invalid.components[0].motionGroup = "";
   assert.throws(() => validateModelManifest(invalid), /motionGroup 存在时必须是非空字符串/);
-});
-
-test("legacy flat configs are not accepted", () => {
-  assert.throws(() => validateModelManifest({
-    type: "head",
-    group: "garupa",
-    name: "legacy",
-    model: "model.glb",
-  }), /顶层只能包含 components/);
 });
 
 test("defaultExpression references existing eye and both mouth states", () => {

@@ -12,7 +12,7 @@ test("unified manifests contain only a components array, including empty directo
   const manifest = { components: [{ type: "future-resource" }] };
   assert.equal(validateResourceManifest(manifest), manifest);
   assert.throws(
-    () => validateResourceManifest({ type: "model", components: [{ type: "model" }] }),
+    () => validateResourceManifest({ extra: true, components: [{ type: "model" }] }),
     /顶层只能包含 components/,
   );
   assert.deepEqual(validateResourceManifest({ components: [] }), { components: [] });

@@ -102,35 +102,14 @@ test("characters isolate shader ticks, renderer references and unload cleanup", 
     const disposedFixture = fixture();
     try { await scope.applyCustomShaders(disposedFixture, disposedFixture.scene); }
     catch { rejectedDisposedScope = true; }
-    let legacyDestroyed = 0;
-    resourcePackages.shaders.registerPackage({ components: [{ type: "shader", name: "legacy-fixture",
-      src: "shader.glsl", script: "shader.js", samplers: [],
-      passes: [{ id: "Forward", sections: {} }, { id: "Outline", sections: {} }],
-    }] }, {
-      source: new URL("/legacy/config.json", location.href).href,
-      loadText: async () => "",
-      loadModule: async () => ({ default: class {
-        createPass() { throw new Error("Legacy hook must not run"); }
-        destroy() { legacyDestroyed++; }
-      } }),
-    });
-    const legacyScope = createShaderRuntimeScope(a.renderer, resourcePackages.shaders);
-    const legacyFixture = fixture();
-    legacyFixture.scene.children[0].material.userData.shader = "legacy-fixture";
-    let legacyRejected = false;
-    try { await legacyScope.applyCustomShaders(legacyFixture, legacyFixture.scene); }
-    catch (error) { legacyRejected = /must use configurePass\(\) and createPassObjects\(\)/.test(error.message); }
-    legacyScope.dispose();
     b.character.dispose();
     a.renderer.dispose(); b.renderer.dispose(); failing.renderer.dispose();
-    return { events, afterA, destroyed, outlineBDisposed, failureIsolated, rejectedDisposedScope,
-      legacyRejected, legacyDestroyed };
+    return { events, afterA, destroyed, outlineBDisposed, failureIsolated, rejectedDisposedScope };
   });
   assert.deepEqual(result, {
     events: [["a", true, true, true], ["b", true, true, true], ["b", true, true, true], ["b", true, true, true]],
     afterA: { destroyed: ["a"], outlineADetached: true, outlineBAttached: true, outlineBDisposed: 0 },
     destroyed: ["a", "b"], outlineBDisposed: 1, failureIsolated: true, rejectedDisposedScope: true,
-    legacyRejected: true, legacyDestroyed: 1,
   });
 });
 
