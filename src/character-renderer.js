@@ -20,14 +20,15 @@ import { createRenderProfileScope } from './render-profiles.js';
 // Owns one character's runtime state. The host owns the scene, camera, renderer,
 // resource catalog, clock and UI; none of those are assumed to be a preview page.
 export class CharacterRenderer {
-  constructor({ renderer, scene, camera, fetchResource = fetch, loader = new ResourceGLTFLoader(fetchResource), resourcePackages = new ResourcePackages({ fetchResource }), meshClothEnabled = true }) {
+  constructor({ renderer, scene, camera, fetchResource = fetch, loader, resourcePackages = new ResourcePackages({ fetchResource }), meshClothEnabled = true }) {
     if (typeof meshClothEnabled !== "boolean") throw new Error("meshClothEnabled must be boolean");
     this.meshClothEnabled = meshClothEnabled;
     this.resourcePackages = resourcePackages;
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
-    this.loader = loader;
+    this.ownedLoader = loader ? null : new ResourceGLTFLoader(fetchResource, { renderer });
+    this.loader = loader ?? this.ownedLoader;
     this.fetchResource = (...args) => fetchResource(...args);
     this.generation = 0;
     this.motionGeneration = 0;
@@ -622,5 +623,8 @@ export class CharacterRenderer {
     } else this.renderer.render(this.scene, this.camera);
   }
 
-  dispose() { this.clear({ rememberFace: false }); }
+  dispose() {
+    try { this.clear({ rememberFace: false }); }
+    finally { this.ownedLoader?.dispose(); }
+  }
 }
