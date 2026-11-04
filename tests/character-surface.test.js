@@ -100,3 +100,15 @@ test('failed composed load releases late successful source without double dispos
   await Promise.resolve(); await Promise.resolve();
   assert.equal(disposed, 1); assert.equal(character.root, null);
 });
+
+test('adapter teardown failure still releases model and shader resources', () => {
+  const character = new CharacterRenderer({ loader: {} });
+  const released = [];
+  character.focusAdapter = { dispose() { throw new Error('adapter failed'); } };
+  character.physics = { destroy() { released.push('physics'); } };
+  character.shaderScope = { dispose() { released.push('shader'); } };
+  character.modelResources = { dispose() { released.push('model'); } };
+  assert.throws(() => character.clear(), /adapter failed/);
+  assert.deepEqual(released, ['physics', 'shader', 'model']);
+  assert.equal(character.modelResources, null);
+});

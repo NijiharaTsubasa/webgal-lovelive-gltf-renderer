@@ -387,12 +387,9 @@ async function resolvePassTextures(shaderName, shader, materialPass, getTextureB
       textures[slot] = await Promise.all(index.map(getTextureBinding));
     } else textures[slot] = await getTextureBinding(index);
   }
-  const resolved = await resolveSamplerTextures(shader.samplers, textures,
-    uri => scope.registry.loadTexture(shaderName, uri), `Shader ${shaderName} pass ${materialPass.id}`);
-  for (const descriptor of shader.samplers) {
-    if (descriptor.type === 'sampler2DArray' && Object.hasOwn(textures, descriptor.name)) scope.resources?.add(resolved[descriptor.name]);
-  }
-  return resolved;
+  return resolveSamplerTextures(shader.samplers, textures,
+    uri => scope.registry.loadTexture(shaderName, uri), `Shader ${shaderName} pass ${materialPass.id}`,
+    texture => scope.resources.add(texture));
 }
 
 // Profiles request a material only. The configured Shader runtime is shared

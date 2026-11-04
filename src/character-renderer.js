@@ -256,22 +256,26 @@ export class CharacterRenderer {
     this.parameterFaceGeneration += 1;
     this.parameterExpressionGeneration += 1;
     this.focusAdapterGeneration += 1;
-    this.focus.restore(); this.focus.targets = [];
-    this.focusAdapter?.dispose(); this.focusAdapter = null;
-    if (rememberFace) this.rememberFace();
-    this.setExternalExpressionDriver(null);
+    let resourceFailure;
+    const cleanup = operation => {
+      try { operation(); } catch (error) { resourceFailure ??= error; }
+    };
+    cleanup(() => this.focus.restore()); this.focus.targets = [];
+    cleanup(() => this.focusAdapter?.dispose()); this.focusAdapter = null;
+    if (rememberFace) cleanup(() => this.rememberFace());
+    cleanup(() => this.setExternalExpressionDriver(null));
     this.parameterFaceActive = false;
-    this.parameterBody?.restore(); this.parameterBody = null;
-    this.parameterPlayer?.dispose(); this.parameterPlayer = null;
+    cleanup(() => this.parameterBody?.restore()); this.parameterBody = null;
+    cleanup(() => this.parameterPlayer?.dispose()); this.parameterPlayer = null;
     this.parts = [];
-    this.physics?.destroy();
+    cleanup(() => this.physics?.destroy());
     this.physics = null;
-    this.behaviors?.setMotion(null);
-    this.motion?.dispose();
+    cleanup(() => this.behaviors?.setMotion(null));
+    cleanup(() => this.motion?.dispose());
     this.motion = null;
     this.motionInfo = null;
     this.pendingMotion = null;
-    this.behaviors?.destroy();
+    cleanup(() => this.behaviors?.destroy());
     this.behaviors = null;
     this.idlePose = null;
     this.face = null;
@@ -280,9 +284,8 @@ export class CharacterRenderer {
     this.faceDefinition = null;
     this.expressionControllers = [];
     this.expressionName = "";
-    let resourceFailure;
     for (const resource of [this.renderProfileScope, this.shaderScope, this.modelResources]) {
-      try { resource?.dispose(); } catch (error) { resourceFailure ??= error; }
+      cleanup(() => resource?.dispose());
     }
     this.renderProfileScope = null;
     this.shaderScope = null;

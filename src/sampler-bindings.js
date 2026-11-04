@@ -163,6 +163,7 @@ export async function resolveSamplerTextures(
   materialTextures = {},
   loadResource = null,
   context = "",
+  ownTexture = texture => texture,
 ) {
   validateSamplerDescriptors(samplers, context);
   const resolved = {};
@@ -172,7 +173,7 @@ export async function resolveSamplerTextures(
     if (Object.prototype.hasOwnProperty.call(materialTextures, name)) {
       const texture = materialTextures[name];
       if (descriptor.type === "sampler2DArray") {
-        resolved[name] = arrayTexture(texture, context, name);
+        resolved[name] = ownTexture(arrayTexture(texture, context, name));
         continue;
       }
       if (!texture?.isTexture) {
