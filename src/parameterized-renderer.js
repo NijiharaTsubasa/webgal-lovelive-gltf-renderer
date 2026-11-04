@@ -550,6 +550,12 @@ export async function applyCustomShaders(gltf, root, rendererArg, scope = defaul
         if (!sourceResult) {
           throw new Error(`Material ${mat.name || i}: one pass must use the source mesh`);
         }
+        // Simulated cloth can turn a sheet authored as one-sided toward the
+        // camera. With its back faces culled, the inverted-hull outline pass
+        // fills those holes in outline color, so draw the inside as fabric.
+        if (object.userData.simulatedCloth && sourceResult.material.side === THREE.FrontSide) {
+          sourceResult.material.side = THREE.DoubleSide;
+        }
         out[i] = sourceResult.material;
         sourcePassStates.push(sourceResult.pass.renderState);
         sourcePassOrders.push(sourceResult.passIndex);

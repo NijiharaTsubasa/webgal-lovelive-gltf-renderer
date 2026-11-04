@@ -31,6 +31,8 @@ class Cloth {
     this.mesh = resolvePrimitive ? resolvePrimitive(definition.node, definition.primitive)
       : primitiveMesh(resolve(definition.node), definition.primitive);
     if (!this.mesh?.isSkinnedMesh) throw new Error("cloth primitive 不是 SkinnedMesh");
+    // Read by applyCustomShaders: the main pass also draws back faces.
+    this.mesh.userData.simulatedCloth = true;
     this.geometry = this.mesh.geometry;
     this.sourcePosition = this.geometry.getAttribute("position");
     this.sourceNormal = this.geometry.getAttribute("normal");
