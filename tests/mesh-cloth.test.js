@@ -209,6 +209,44 @@ test("a collider crossing the cloth within one frame pushes it instead of tunnel
   } finally { sim.destroy(); }
 });
 
+test("the fabric between sparse proxy particles clears a limb, not just the particles", async () => {
+  // Source proxies of 4 x 4 vertex blocks (0.5 m apart); a sphere presses
+  // between four of them from behind.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .15 }] });
+  const position = f.geometry.getAttribute("position");
+  const block = (i) => Math.min(3, Math.floor((position.getX(i) + 1) / .5)) + 4 * Math.min(3, Math.floor((1 - position.getY(i)) / .5));
+  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
+  f.collider.position.set(0, -.5, -.3);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60, (i) => f.collider.position.set(0, -.5, -.3 + Math.min(1, i / 30) * .35));
+    const centre = f.collider.getWorldPosition(new THREE.Vector3());
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).distanceTo(centre) > .15 + .002, `vertex ${i} sags into the sphere`);
+  } finally { sim.destroy(); }
+});
+
+test("a lining pushed by a limb stays behind the fabric in front of it", async () => {
+  // Outer sheet with a lining 5 mm behind it, both in one cloth primitive.
+  const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.005);
+  const n = outer.getAttribute("position").count;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([...outer.getAttribute("position").array, ...lining.getAttribute("position").array], 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute([...outer.getAttribute("normal").array, ...outer.getAttribute("normal").array], 3));
+  geometry.setIndex([...outer.index.array, ...Array.from(outer.index.array, (i) => i + n)]);
+  const f = fixture({ extra: geometry, colliders: [{ shape: "capsule", node: 1, offset: [0, 0, 0], radius: .12, tail: { node: 1, offset: [.6, -.4, 0] } }] });
+  const sim = await f.create();
+  try {
+    run(f, sim, 90, (i) => { f.collider.position.set(-.3, -.2, -.25 + Math.min(1, i / 40) * .3); f.collider.rotation.z = Math.sin(i * .1) * .4; });
+    let pushed = 0;
+    for (let i = 0; i < n; i++) {
+      const front = world(f.mesh, i), back = world(f.mesh, i + n);
+      pushed = Math.max(pushed, front.z);
+      assert.ok(back.z < front.z + 1e-4, `lining vertex ${i} came through the outer fabric`);
+    }
+    assert.ok(pushed > .05, "the limb never reached the cloth");
+  } finally { sim.destroy(); }
+});
+
 test("cloth never folds behind its animated surface", async () => {
   const f = fixture({ gravity: [0, 0, -60] });
   const sim = await f.create(), record = sim.records[0];

@@ -52,12 +52,11 @@ class Cloth {
       this.particleRadius = new Float64Array(count);
       this.maxDistance = new Float64Array(count);
       this.colliderData = new Float64Array(this.colliders.length * COLLIDER_STRIDE);
-      this.renderPoint = new Float64Array(3);
       this.normalScratch = [0, 0, 0];
       this.solver = new ProxyClothSolver({
         count, edges: this.proxy.edges, bends: this.proxy.bends, fixed: this.proxy.fixed,
         colliderTypes: this.colliders.map((r) => COLLIDER[r.shape]),
-        minimumGap: 0,
+        minimumGap: 0, probes: this.proxy.probes,
       });
       this.position = new THREE.BufferAttribute(this.restPosition.slice(), 3).setUsage(THREE.DynamicDrawUsage);
       this.normal = new THREE.BufferAttribute(this.restNormal.slice(), 3).setUsage(THREE.DynamicDrawUsage);
@@ -94,6 +93,8 @@ class Cloth {
       for (let k = 0; k < 4; k++) if (indices[v * 4 + k] >= 0 && weights[v * 4 + k] > 0 && !fixed[indices[v * 4 + k]]) return true;
       return false;
     }));
+    this.activeVertex = new Uint8Array(this.sourcePosition.count);
+    for (const v of this.active) this.activeVertex[v] = 1;
     const nodes = this.topology.vertices.length;
     this.activeNode = new Uint8Array(nodes);
     for (const v of this.active) this.activeNode[this.topology.mapping[v]] = 1;
@@ -114,22 +115,6 @@ class Cloth {
     needed.forEach((flag, node) => { if (flag) used.add(this.topology.vertices[node]); });
     this.used = Uint32Array.from([...used].sort((a, b) => a - b));
     this.final = new Float64Array(nodes * 3);
-    // Outward side per welded vertex: the mean of its authored normals. Hard
-    // edges keep a sensible average; back-to-back faces of double-sided cloth
-    // cancel, so no backstop is applied where "outside" is undefined.
-    this.nodeNormal = new Float64Array(nodes * 3);
-    all.forEach((v) => {
-      const f = this.topology.mapping[v] * 3;
-      for (let k = 0; k < 3; k++) this.nodeNormal[f + k] += this.restNormal[v * 3 + k];
-    });
-    const members = new Uint32Array(nodes);
-    all.forEach((v) => members[this.topology.mapping[v]]++);
-    for (let node = 0; node < nodes; node++) {
-      const f = node * 3, length = Math.hypot(this.nodeNormal[f], this.nodeNormal[f + 1], this.nodeNormal[f + 2]);
-      // Less than half of the members agreeing: treat as undefined.
-      const scale = length > .5 * members[node] ? 1 / length : 0;
-      for (let k = 0; k < 3; k++) this.nodeNormal[f + k] *= scale;
-    }
     this.referenceGeometryNormal = new Float64Array(nodes * 3);
     this.finalGeometryNormal = new Float64Array(nodes * 3);
     // Bounds of everything the cloth never moves, extended per frame.
@@ -270,6 +255,15 @@ class Cloth {
       SP[v * 3 + 1] = VS[q + 1] * x + VS[q + 4] * y + VS[q + 7] * z + VS[q + 10];
       SP[v * 3 + 2] = VS[q + 2] * x + VS[q + 5] * y + VS[q + 8] * z + VS[q + 11];
     }
+    // Probe anchors: each probe vertex's animated position (proxy-skinned
+    // where the vertex is driven by proxies).
+    const { vertex: probeVertex } = this.proxy.probes, anchor = this.solver?.probeAnchor;
+    if (anchor) {
+      for (let p = 0; p < probeVertex.length; p++) {
+        const v = probeVertex[p], source = this.activeVertex[v] ? SP : S;
+        anchor[p * 3] = source[v * 3]; anchor[p * 3 + 1] = source[v * 3 + 1]; anchor[p * 3 + 2] = source[v * 3 + 2];
+      }
+    }
     proxyNormals(this.proxy.triangles, T, this.targetNormals, this.proxy.orientation);
     const scale = maximumStretch(mesh.matrixWorld);
     // Contact radius: the cloth gap plus how far member vertices sit behind
@@ -339,36 +333,20 @@ class Cloth {
     const P = this.solver.positions, T = this.targets, S = this.skinned, F = this.final;
     const { indices, weights } = this.proxy.weights, { mapping, vertices } = this.topology;
     const restNormal = this.restNormal, inverse = this.bindingInverse, binding = this.vertexBinding;
-    const solver = this.solver, gap = solver.minimumGap, near = solver.near, point = this.renderPoint;
-    const activeNodes = this.activeNodes, nodeNormal = this.nodeNormal, SP = this.proxySkinned, VS = this.vertexSkin;
+    const activeNodes = this.activeNodes, SP = this.proxySkinned, VS = this.vertexSkin;
     // 1. Simulated world position per welded vertex: the proxy-skinned pose
     // plus the interpolated simulation displacement sum_i w_i (P_i - T_i).
-    // Displacements, not per-proxy rotations, keep pleats and layers smooth.
+    // Collision clearance is already resolved for this blended surface by the
+    // solver's probes; nothing is pushed vertex by vertex here, which would
+    // move a lining past the fabric in front of it.
     for (let a = 0; a < activeNodes.length; a++) {
-      const node = activeNodes[a], v = vertices[node], o = v * 3, w4 = v * 4, f = node * 3, q = v * 12;
-      const sx = SP[o], sy = SP[o + 1], sz = SP[o + 2];
-      let fx = sx, fy = sy, fz = sz, contact = 0;
+      const node = activeNodes[a], v = vertices[node], w4 = v * 4, f = node * 3, o = v * 3;
+      let fx = SP[o], fy = SP[o + 1], fz = SP[o + 2];
       for (let k = 0; k < 4; k++) {
         const proxy = indices[w4 + k];
         if (proxy < 0) break;
         const w = weights[w4 + k], p = proxy * 3;
-        contact |= near[proxy];
         fx += w * (P[p] - T[p]); fy += w * (P[p + 1] - T[p + 1]); fz += w * (P[p + 2] - T[p + 2]);
-      }
-      // Like the proxies, a render vertex never folds behind its own animated
-      // surface: the artist's skinned pose already clears the body there.
-      const [nx, ny, nz] = cofactorApply(VS, q, nodeNormal[f], nodeNormal[f + 1], nodeNormal[f + 2], this.normalScratch);
-      const nn = nx * nx + ny * ny + nz * nz;
-      if (nn > 1e-30) {
-        const behind = (fx - sx) * nx + (fy - sy) * ny + (fz - sz) * nz;
-        if (behind < 0) { const k = behind / nn; fx -= nx * k; fy -= ny * k; fz -= nz * k; }
-      }
-      // The proxy surface keeps clear of colliders; render vertices hanging
-      // between or behind those proxies get the same minimum clearance.
-      if (contact) {
-        point[0] = fx; point[1] = fy; point[2] = fz;
-        solver.collidePoint(point, 0, gap, SP, null, o, contact);
-        fx = point[0]; fy = point[1]; fz = point[2];
       }
       if (!Number.isFinite(fx + fy + fz)) throw new Error("cloth 求解产生非有限坐标");
       F[f] = fx; F[f + 1] = fy; F[f + 2] = fz;

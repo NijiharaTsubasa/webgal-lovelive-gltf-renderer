@@ -59,7 +59,7 @@ export function buildClothProxy(geometry, fixed, proxy, { spacing } = {}) {
 
   const fixedVertex = new Uint8Array(position.count);
   for (const i of fixed) fixedVertex[i] = 1;
-  const weights = renderWeights(position, used, renderCluster, rest, triangles, adjacency, fixedVertex);
+  const weights = kernelWeights(position, used, renderCluster, rest, adjacency, fixedVertex);
   // Authored render normals say which side is outside. Proxy triangles merge
   // both faces of thin or double-sided cloth, so their winding cannot; orient
   // every proxy normal to agree with its members' normals.
@@ -87,11 +87,44 @@ export function buildClothProxy(geometry, fixed, proxy, { spacing } = {}) {
     extent = Math.max(extent, Math.hypot(position.getX(v) - rest[c * 3], position.getY(v) - rest[c * 3 + 1], position.getZ(v) - rest[c * 3 + 2]));
   }
   const allEdges = concat(edges, bridges);
-  return compact({
+  return withProbes(position, compact({
     depth: fixedDistance(count, rest, proxyFixed, allEdges), extent,
     topology, count, rest, fixed: proxyFixed, renderCluster, used,
     triangles, edges: allEdges, bends, weights, thickness, orientation,
+  }));
+}
+
+const PROBES = 8;
+
+/**
+ * Collision probes: the outermost member vertices of each moving proxy. A
+ * sparse particle alone lets the fabric between particles (and the layers
+ * behind it) sag into a limb; probes carried with the particle let the solver
+ * push the whole patch clear, moving its layers together.
+ */
+function withProbes(position, proxy) {
+  const { count, members, memberStart, rest, fixed } = proxy;
+  const start = new Uint32Array(count + 1), vertex = [];
+  for (let c = 0; c < count; c++) {
+    if (!fixed[c]) {
+      const seen = new Set(), candidates = [];
+      for (let k = memberStart[c]; k < memberStart[c + 1]; k++) {
+        const v = members[k], x = position.getX(v), y = position.getY(v), z = position.getZ(v);
+        const key = `${x},${y},${z}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push([(x - rest[c * 3]) ** 2 + (y - rest[c * 3 + 1]) ** 2 + (z - rest[c * 3 + 2]) ** 2, v]);
+      }
+      candidates.sort((a, b) => b[0] - a[0]);
+      for (const [, v] of candidates.slice(0, PROBES)) vertex.push(v);
+    }
+    start[c + 1] = vertex.length;
+  }
+  const index = new Int32Array(vertex.length * 4), weight = new Float64Array(vertex.length * 4);
+  vertex.forEach((v, p) => {
+    for (let k = 0; k < 4; k++) { index[p * 4 + k] = proxy.weights.indices[v * 4 + k]; weight[p * 4 + k] = proxy.weights.weights[v * 4 + k]; }
   });
+  return { ...proxy, probes: { start, vertex: Uint32Array.from(vertex), index, weight } };
 }
 
 /**
@@ -395,68 +428,46 @@ function restNormals(count, rest, triangles) {
   return normals;
 }
 
-/** Closest point on triangle (Ericson), returning barycentric weights. */
-function closestBarycentric(p, a, b, c, out) {
-  const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
-  const acx = c[0] - a[0], acy = c[1] - a[1], acz = c[2] - a[2];
-  const apx = p[0] - a[0], apy = p[1] - a[1], apz = p[2] - a[2];
-  const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
-  if (d1 <= 0 && d2 <= 0) return set(out, 1, 0, 0);
-  const bpx = p[0] - b[0], bpy = p[1] - b[1], bpz = p[2] - b[2];
-  const d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
-  if (d3 >= 0 && d4 <= d3) return set(out, 0, 1, 0);
-  const vc = d1 * d4 - d3 * d2;
-  if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); return set(out, 1 - v, v, 0); }
-  const cpx = p[0] - c[0], cpy = p[1] - c[1], cpz = p[2] - c[2];
-  const d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
-  if (d6 >= 0 && d5 <= d6) return set(out, 0, 0, 1);
-  const vb = d5 * d2 - d1 * d6;
-  if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); return set(out, 1 - w, 0, w); }
-  const va = d3 * d6 - d5 * d4;
-  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { const w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); return set(out, 0, 1 - w, w); }
-  const denominator = 1 / (va + vb + vc);
-  const v = vb * denominator, w = vc * denominator;
-  return set(out, 1 - v - w, v, w);
-}
-function set(out, u, v, w) { out[0] = u; out[1] = v; out[2] = w; return out; }
-
 /**
- * Up to four proxy weights per render vertex: barycentric coordinates on the
- * nearest proxy triangle around its own cluster. Points on the proxy surface
- * interpolate exactly; neighbouring render vertices share triangles, so the
- * deformation stays continuous across cluster boundaries.
+ * Up to four proxy weights per render vertex from a smooth spatial kernel over
+ * its own proxy and that proxy's neighbours. Unlike a projection onto the
+ * nearest proxy triangle, stacked layers of a pleat or lining (a centimetre
+ * apart) get practically the same weights, so they move together and keep
+ * their order; the blend also varies smoothly across the surface.
  */
-function renderWeights(position, used, renderCluster, rest, triangles, adjacency, fixedVertex) {
+function kernelWeights(position, used, renderCluster, rest, adjacency, fixedVertex) {
   const count = adjacency.length;
-  const incident = Array.from({ length: count }, () => []);
-  for (let t = 0; t < triangles.length; t += 3) for (let k = 0; k < 3; k++) incident[triangles[t + k]].push(t);
   const indices = new Int32Array(position.count * 4).fill(-1), weights = new Float32Array(position.count * 4);
-  const p = [0, 0, 0], a = [0, 0, 0], b = [0, 0, 0], c = [0, 0, 0], bary = [0, 0, 0], best = [0, 0, 0];
-  const load = (target, i) => { target[0] = rest[i * 3]; target[1] = rest[i * 3 + 1]; target[2] = rest[i * 3 + 2]; };
+  // Kernel width: half the median distance between neighbouring proxies. All
+  // proxies within reach take part, whatever cluster the vertex fell into, so
+  // the weights are a smooth function of position alone.
+  const lengths = [];
+  for (let c = 0; c < count; c++) for (const d of adjacency[c]) if (d > c) {
+    lengths.push(Math.hypot(rest[c * 3] - rest[d * 3], rest[c * 3 + 1] - rest[d * 3 + 1], rest[c * 3 + 2] - rest[d * 3 + 2]));
+  }
+  const sigma = .5 * median(lengths), reach = 2.5 * sigma;
+  const grid = new Map(), key = (x, y, z) => `${Math.floor(x / reach)},${Math.floor(y / reach)},${Math.floor(z / reach)}`;
+  for (let c = 0; c < count; c++) {
+    const k = key(rest[c * 3], rest[c * 3 + 1], rest[c * 3 + 2]);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(c);
+  }
   for (const v of used) {
     const own = renderCluster[v];
-    // Declared fixed vertices always keep their animated pose exactly.
-    if (fixedVertex[v]) { indices[v * 4] = own; weights[v * 4] = 1; continue; }
-    p[0] = position.getX(v); p[1] = position.getY(v); p[2] = position.getZ(v);
-    const candidates = new Set(incident[own]);
-    for (const n of adjacency[own]) for (const t of incident[n]) candidates.add(t);
-    let bestDistance = Infinity, bestTriangle = -1;
-    for (const t of candidates) {
-      load(a, triangles[t]); load(b, triangles[t + 1]); load(c, triangles[t + 2]);
-      closestBarycentric(p, a, b, c, bary);
-      const x = a[0] * bary[0] + b[0] * bary[1] + c[0] * bary[2] - p[0];
-      const y = a[1] * bary[0] + b[1] * bary[1] + c[1] * bary[2] - p[1];
-      const z = a[2] * bary[0] + b[2] * bary[1] + c[2] * bary[2] - p[2];
-      const d = x * x + y * y + z * z;
-      if (d < bestDistance - 1e-14) { bestDistance = d; bestTriangle = t; best[0] = bary[0]; best[1] = bary[1]; best[2] = bary[2]; }
+    if (fixedVertex[v] || !(sigma > 0)) { indices[v * 4] = own; weights[v * 4] = 1; continue; }
+    const x = position.getX(v), y = position.getY(v), z = position.getZ(v);
+    const gx = Math.floor(x / reach), gy = Math.floor(y / reach), gz = Math.floor(z / reach);
+    const candidates = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      for (const c of grid.get(`${gx + dx},${gy + dy},${gz + dz}`) ?? []) {
+        const d2 = (x - rest[c * 3]) ** 2 + (y - rest[c * 3 + 1]) ** 2 + (z - rest[c * 3 + 2]) ** 2;
+        if (d2 <= reach * reach) candidates.push([Math.exp(-d2 / (2 * sigma * sigma)), c]);
+      }
     }
-    if (bestTriangle < 0) { indices[v * 4] = own; weights[v * 4] = 1; continue; }
-    let slot = 0, total = 0;
-    for (let k = 0; k < 3; k++) if (best[k] > 1e-4) total += best[k];
-    for (let k = 0; k < 3; k++) {
-      if (best[k] <= 1e-4) continue;
-      indices[v * 4 + slot] = triangles[bestTriangle + k]; weights[v * 4 + slot] = best[k] / total; slot++;
-    }
+    if (!candidates.length) { indices[v * 4] = own; weights[v * 4] = 1; continue; }
+    candidates.sort((a, b) => b[0] - a[0]);
+    const top = candidates.slice(0, 4), total = top.reduce((sum, [w]) => sum + w, 0);
+    top.forEach(([w, c], k) => { indices[v * 4 + k] = c; weights[v * 4 + k] = w / total; });
   }
   return { indices, weights };
 }

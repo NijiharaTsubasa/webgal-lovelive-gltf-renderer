@@ -23,7 +23,16 @@ const CONTACT_SLACK = .02;
 const RESTORE = .25;
 
 export class ProxyClothSolver {
-  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0 }) {
+  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null }) {
+    // Probes: surface points embedded in up to four particles (CSR by the
+    // particle that owns them). Their animated positions (`probeAnchor`) are
+    // set per step by the owner; probes collide with the minimum gap.
+    this.probeStart = probes?.start ?? new Uint32Array(count + 1);
+    this.probeIndex = probes?.index ?? new Int32Array(0);
+    this.probeWeight = probes?.weight ?? new Float64Array(0);
+    this.probeAnchor = new Float64Array(this.probeStart[count] * 3);
+    this.probePoint = new Float64Array(3);
+    this.probeReference = new Float64Array(3);
     // Extra broadphase reach for points that follow a particle from a distance.
     this.contactMargin = contactMargin;
     this.count = count;
@@ -43,8 +52,7 @@ export class ProxyClothSolver {
     // Per collider world AABB of its contact region, for a cheap reject.
     this.bounds = new Float64Array(this.types.length * 6);
     this.pairs = new Uint32Array(Math.max(2, count * this.types.length * 2));
-    // Particles with a contact candidate in the last substep.
-    this.near = new Uint32Array(count);
+
     this.lastSubsteps = 0;
   }
 
@@ -105,6 +113,7 @@ export class ProxyClothSolver {
   step({ targets, normals, colliders, radius, stiffness, damping, gravity, delta, backstop = -1, maxDistance = null }) {
     if (!(delta > 0)) throw new Error("cloth 步长必须为正有限数");
     const n = this.substeps(colliders, radius, targets), h = delta / n;
+    this.frameTargets = targets;
     this.lastSubsteps = n;
     const retention = Math.pow(1 - damping, 1 / n);
     const x = this.positions, prev = this.previous, v = this.velocity, t = this.targets;
@@ -148,12 +157,19 @@ export class ProxyClothSolver {
         // Bending is soft; once per substep is enough and halves link work.
         if (!iteration) solveLinks(this.bends, this.bendRest, x, fixed, BEND, BEND);
         if (maxDistance) limitDistance(x, t, fixed, maxDistance);
+        // Collisions come last so they have the final word: where a limb
+        // meets the body (a raised thigh against the hips) the backstop must
+        // not drag cloth back into either.
+        if (backstop >= 0 && normals) this.backstop(normals, backstop);
+        // Probes only shape the drawn surface: resolving them once, at the end
+        // of the step, keeps it clear without paying for them every substep.
+        const probes = s === n && iteration === ITERATIONS - 1;
         for (let p = 0; p < pairs; p += 2) {
-          const i = this.pairs[p];
-          this.collideWith(this.pairs[p + 1], x, i * 3, radius[i], t, prev, i * 3);
+          const i = this.pairs[p], k = this.pairs[p + 1];
+          this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3);
+          if (probes) this.collideProbes(k, i);
         }
       }
-      if (backstop >= 0 && normals) this.backstop(normals, backstop);
       for (let i = 0, o = 0; i < count; i++, o += 3) {
         if (fixed[i]) continue;
         v[o] = (x[o] - prev[o]) / h; v[o + 1] = (x[o + 1] - prev[o + 1]) / h; v[o + 2] = (x[o + 2] - prev[o + 2]) / h;
@@ -162,6 +178,43 @@ export class ProxyClothSolver {
     this.lastTargets.set(targets);
     this.lastColliders.set(colliders);
     for (let i = 0; i < x.length; i++) if (!Number.isFinite(x[i])) throw new Error("cloth 求解产生非有限坐标");
+  }
+
+  /**
+   * Probes owned by particle i against collider k. A probe sits where its
+   * render vertex will be drawn: anchor + sum_j w_j (x_j - T_j). Its push is
+   * shared by the moving particles it is embedded in (minimum-norm split),
+   * so the blended surface itself clears the collider.
+   */
+  collideProbes(k, i) {
+    const start = this.probeStart[i], end = this.probeStart[i + 1];
+    if (start === end) return;
+    const x = this.positions, t = this.targets, T = this.frameTargets, fixed = this.fixed;
+    const anchor = this.probeAnchor, index = this.probeIndex, weight = this.probeWeight;
+    const point = this.probePoint, ref = this.probeReference, gap = this.minimumGap;
+    for (let p = start; p < end; p++) {
+      let px = anchor[p * 3], py = anchor[p * 3 + 1], pz = anchor[p * 3 + 2], rx = px, ry = py, rz = pz, norm = 0;
+      for (let j = p * 4; j < p * 4 + 4; j++) {
+        const c = index[j];
+        if (c < 0) break;
+        const w = weight[j], o = c * 3;
+        px += w * (x[o] - T[o]); py += w * (x[o + 1] - T[o + 1]); pz += w * (x[o + 2] - T[o + 2]);
+        rx += w * (t[o] - T[o]); ry += w * (t[o + 1] - T[o + 1]); rz += w * (t[o + 2] - T[o + 2]);
+        if (!fixed[c]) norm += w * w;
+      }
+      if (!norm) continue;
+      point[0] = px; point[1] = py; point[2] = pz; ref[0] = rx; ref[1] = ry; ref[2] = rz;
+      this.collideWith(k, point, 0, gap, ref, null, 0);
+      const dx = point[0] - px, dy = point[1] - py, dz = point[2] - pz;
+      if (!dx && !dy && !dz) continue;
+      for (let j = p * 4; j < p * 4 + 4; j++) {
+        const c = index[j];
+        if (c < 0) break;
+        if (fixed[c]) continue;
+        const s = weight[j] / norm, o = c * 3;
+        x[o] += dx * s; x[o + 1] += dy * s; x[o + 2] += dz * s;
+      }
+    }
   }
 
   updateBounds(margin) {
@@ -184,36 +237,24 @@ export class ProxyClothSolver {
     }
   }
 
-  /**
-   * Keep a point `r` away from every collider. Where its animated reference
-   * `ref` is closer than `r` but clear of the body, it stays as authored; see
-   * `clearance` for references that sink into the collider.
-   */
-  collidePoint(x, o, r, ref, prev, ro = o, mask = 0xffffffff) {
-    const b = this.bounds;
-    for (let k = 0; k < this.types.length; k++) {
-      if (k < 32 && !(mask & (1 << k))) continue;
-      const bo = k * 6;
-      if (x[o] < b[bo] || x[o + 1] < b[bo + 1] || x[o + 2] < b[bo + 2]
-        || x[o] > b[bo + 3] || x[o + 1] > b[bo + 4] || x[o + 2] > b[bo + 5]) continue;
-      this.collideWith(k, x, o, r, ref, prev, ro);
-    }
-  }
-
   contactCandidates() {
-    const x = this.positions, b = this.bounds, fixed = this.fixed, pairs = this.pairs, near = this.near;
-    near.fill(0);
+    const x = this.positions, b = this.bounds, fixed = this.fixed, pairs = this.pairs;
     let n = 0;
     for (let k = 0; k < this.types.length; k++) {
       const bo = k * 6, x0 = b[bo], y0 = b[bo + 1], z0 = b[bo + 2], x1 = b[bo + 3], y1 = b[bo + 4], z1 = b[bo + 5];
       for (let i = 0, o = 0; i < this.count; i++, o += 3) {
         if (fixed[i] || x[o] < x0 || x[o + 1] < y0 || x[o + 2] < z0 || x[o] > x1 || x[o + 1] > y1 || x[o + 2] > z1) continue;
-        pairs[n++] = i; pairs[n++] = k; near[i] |= k < 32 ? 1 << k : 0xffffffff;
+        pairs[n++] = i; pairs[n++] = k;
       }
     }
     return n;
   }
 
+  /**
+   * Keep point `o` of `x` a distance `r` away from collider k. Where its
+   * animated reference (`ro` in `ref`) is closer than `r` but clear of the
+   * body, it stays as authored; see `clearance` for references that sink in.
+   */
   collideWith(k, x, o, r, ref, prev, ro) {
     const c = this.colliders, types = this.types, gap = this.minimumGap;
     {
