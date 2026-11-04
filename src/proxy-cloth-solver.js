@@ -95,6 +95,37 @@ export class ProxyClothSolver {
     this.velocity.fill(0);
     this.lastColliders.set(colliders);
     this.colliders.set(colliders);
+    this.markAuthoredEdges(targets, colliders);
+  }
+
+  /**
+   * Edges that already touch or cross a thin limb in the starting pose (a belt
+   * pendant draped over the hips, a chord of the proxy mesh running through
+   * a thigh) are authored that way: edge contact leaves those pairs alone.
+   * Every other edge keeps the limb on one side of it.
+   */
+  markAuthoredEdges(targets, colliders) {
+    const types = this.types, K = types.length, edges = this.edges, gap = this.minimumGap;
+    const flags = this.edgeAuthored = new Uint8Array((edges.length / 2) * K);
+    for (let k = 0; k < K; k++) {
+      if (types[k] !== COLLIDER.sphere && types[k] !== COLLIDER.capsule) continue;
+      const q = k * COLLIDER_STRIDE;
+      if (Math.max(colliders[q + 6], colliders[q + 7]) >= EDGE_RADIUS) continue;
+      const ax = colliders[q], ay = colliders[q + 1], az = colliders[q + 2];
+      const sx = colliders[q + 3] - ax, sy = colliders[q + 4] - ay, sz = colliders[q + 5] - az;
+      const ss = sx * sx + sy * sy + sz * sz, r0 = colliders[q + 6], dr = colliders[q + 7] - r0;
+      const slope2 = ss > 0 ? dr * dr / ss : 0, shift = slope2 < .99 ? dr / Math.sqrt(1 - slope2) : 0;
+      for (let e = 0; e < edges.length; e += 2) {
+        const a = edges[e] * 3, b = edges[e + 1] * 3;
+        for (let s = 0; s <= 8; s++) {
+          const f = s / 8, px = targets[a] + (targets[b] - targets[a]) * f;
+          const py = targets[a + 1] + (targets[b + 1] - targets[a + 1]) * f, pz = targets[a + 2] + (targets[b + 2] - targets[a + 2]) * f;
+          const u = touchParameter(px, py, pz, ax, ay, az, sx, sy, sz, ss, shift);
+          const d = Math.hypot(px - ax - sx * u, py - ay - sy * u, pz - az - sz * u) - (r0 + dr * u);
+          if (d < 2 * gap) { flags[(e / 2) * K + k] = 1; break; }
+        }
+      }
+    }
   }
 
   /**
@@ -346,6 +377,7 @@ export class ProxyClothSolver {
     const x = this.positions, c = this.colliders, fixed = this.fixed, q = k * COLLIDER_STRIDE;
     const a = this.edges[e], b = this.edges[e + 1];
     if (fixed[a] && fixed[b]) return;
+    if (this.edgeAuthored?.[(e / 2) * this.types.length + k]) return;
     const oa = a * 3, ob = b * 3;
     const ax = c[q], ay = c[q + 1], az = c[q + 2], sx = c[q + 3] - ax, sy = c[q + 4] - ay, sz = c[q + 5] - az;
     const r0 = c[q + 6], dr = c[q + 7] - r0, ss = sx * sx + sy * sy + sz * sz;
@@ -372,17 +404,17 @@ export class ProxyClothSolver {
     const u = touchParameter(px, py, pz, ax, ay, az, sx, sy, sz, ss, shift);
     const R = r0 + dr * u, qx = ax + sx * u, qy = ay + sy * u, qz = az + sz * u;
     let nx = px - qx, ny = py - qy, nz = pz - qz;
-    const d2 = nx * nx + ny * ny + nz * nz, r = radius[a] * g + radius[b] * f;
-    let limit = R + r;
-    if (d2 >= limit * limit) return;
-    const tx = t[oa] * g + t[ob] * f, ty = t[oa + 1] * g + t[ob + 1] * f, tz = t[oa + 2] * g + t[ob + 2] * f;
-    const ut = touchParameter(tx, ty, tz, ax, ay, az, sx, sy, sz, ss, shift);
-    const rx = tx - ax - sx * ut, ry = ty - ay - sy * ut, rz = tz - az - sz * ut;
-    const reference = Math.sqrt(rx * rx + ry * ry + rz * rz) - dr * ut + dr * u;
-    if (reference < limit) limit = R + clearance(reference - R, r, this.minimumGap);
+    // An edge only has to keep the limb from passing between its particles:
+    // it keeps the cloth's own gap, not the particles' contact radius (which
+    // includes the thickness of everything merged into them).
+    const d2 = nx * nx + ny * ny + nz * nz, limit = R + this.minimumGap;
     if (d2 >= limit * limit) return;
     let d = Math.sqrt(d2);
-    if (d < 1e-9) { nx = rx; ny = ry; nz = rz; d = Math.sqrt(rx * rx + ry * ry + rz * rz); }
+    if (d < 1e-9) {
+      // On the axis: leave towards the animated edge point.
+      nx = t[oa] * g + t[ob] * f - qx; ny = t[oa + 1] * g + t[ob + 1] * f - qy; nz = t[oa + 2] * g + t[ob + 2] * f - qz;
+      d = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    }
     if (d < 1e-9) return;
     // Move the edge point to the cone surface (plus clearance) on that side.
     const scale = limit / d;

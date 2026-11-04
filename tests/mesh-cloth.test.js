@@ -488,6 +488,23 @@ test("a limb thinner than the particle spacing pushes the fabric instead of thre
   } finally { sim.destroy(); }
 });
 
+test("cloth authored across a thin limb stays as authored at rest", async () => {
+  // A belt pendant draped over the hips: in the starting pose the fabric
+  // between two particles already runs through a thin collider.
+  const f = fixture({ segments: 4, colliders: [{ shape: "capsule", node: 1, offset: [-.12, 0, 0], radius: .04, tail: { node: 1, offset: [.12, 0, 0] } }] });
+  f.cloth.proxy = { vertices: Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i) };
+  // The fabric cuts through the front of the limb, 1 cm behind it.
+  f.collider.position.set(0, -.25, -.01);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60);
+    const rest = sim.records[0].restPosition;
+    let worst = 0;
+    for (const i of moving(f)) worst = Math.max(worst, world(f.mesh, i).distanceTo(new THREE.Vector3().fromArray(rest, i * 3)));
+    assert.ok(worst < 1e-3, `the cloth moved ${(worst * 1000).toFixed(1)} mm away from its authored pose`);
+  } finally { sim.destroy(); }
+});
+
 /** A skinned sphere mesh of the given radius following `bone`, as a body part. */
 function bodySphere(root, bone, radius) {
   const geometry = new THREE.SphereGeometry(radius, 48, 24);
