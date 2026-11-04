@@ -29,6 +29,9 @@ const BODY_BOUNDS_PAD = .15;
  * and tangents turn with the change of the render surface itself, keeping
  * their authored smoothing.
  */
+// A thigh this close to the trunk's up has folded the hip crease shut.
+const CREASE_COS = Math.cos(THREE.MathUtils.degToRad(75));
+
 class Cloth {
   constructor(root, definition, physics, resolve, resolvePrimitive) {
     this.root = root; this.definition = definition;
@@ -352,7 +355,33 @@ class Cloth {
     const d = this.definition;
     this.solver.step({ targets: this.targets, normals: this.targetNormals, colliders, radius: this.particleRadius,
       stiffness: d.stiffness, damping: d.damping, gravity: d.gravity, delta: STEP, backstop: 0,
-      maxDistance: this.maxDistance, body: this.body });
+      maxDistance: this.maxDistance, body: this.body, closedSegments: this.closedCreases() });
+  }
+
+  /**
+   * Legs folded up against the trunk (limbSegment bits): the thigh within
+   * CREASE_ANGLE of the trunk's up. A deep forward bend closes the crease
+   * (about 40 degrees, less when the hands reach the floor); kicks and squats
+   * keep it open (90 degrees and more).
+   */
+  closedCreases() {
+    const b = this.creaseBones ??= (() => {
+      const find = (name) => { let n = null; this.root.traverse((o) => { if (!n && o.name === name) n = o; }); return n; };
+      return {
+        hips: find("Hips"), chest: find("Chest") ?? find("Spine"),
+        legs: [[find("LeftUpperLeg"), find("LeftLowerLeg"), 1 << 1], [find("RightUpperLeg"), find("RightLowerLeg"), 1 << 2]],
+      };
+    })();
+    if (!b.hips || !b.chest) return 0;
+    const [up, a, thigh] = this.creaseScratch ??= [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    b.chest.getWorldPosition(up).sub(b.hips.getWorldPosition(a)).normalize();
+    let mask = 0;
+    for (const [upper, lower, bit] of b.legs) {
+      if (!upper || !lower) continue;
+      lower.getWorldPosition(thigh).sub(upper.getWorldPosition(a)).normalize();
+      if (thigh.dot(up) > CREASE_COS) mask |= bit;
+    }
+    return mask;
   }
 
   writeGeometry() {

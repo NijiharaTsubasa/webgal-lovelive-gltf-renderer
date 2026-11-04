@@ -27,6 +27,9 @@ const RESTORE = .25;
 // Limbs thinner than this (shins, feet, arms) can slip between two particles;
 // their contacts also test the edges in between.
 const EDGE_RADIUS = .065;
+// limbSegment bits of the two legs.
+const LEG_SEGMENTS = 1 << 1 | 1 << 2;
+
 /** Body segment of a humanoid bone: 0 trunk and head, 1/2 left/right leg, 3/4 left/right arm. */
 export function limbSegment(name) {
   const leg = /UpperLeg|LowerLeg|Foot|Toes/.test(name);
@@ -117,6 +120,7 @@ export class ProxyClothSolver {
     this.axisTurn = new Float64Array(K * 4);
 
     this.lastSubsteps = 0;
+    this.closedSegments = 0;
   }
 
   reset(targets, colliders) {
@@ -214,7 +218,12 @@ export class ProxyClothSolver {
    * targets: animated proxy positions; normals: their animated surface normals.
    * radius: per-particle world contact radius.
    */
-  step({ targets, normals, colliders, radius, stiffness, damping, gravity, delta, backstop = -1, maxDistance = null, body = null }) {
+  /**
+   * closedSegments: limbSegment bits of the legs folded up against the trunk
+   * this step (see updateEntrySides).
+   */
+  step({ targets, normals, colliders, radius, stiffness, damping, gravity, delta, backstop = -1, maxDistance = null, body = null, closedSegments = 0 }) {
+    this.closedSegments = closedSegments;
     if (!(delta > 0)) throw new Error("cloth 步长必须为正有限数");
     const n = this.substeps(colliders, radius, targets), h = delta / n;
     this.rotationsCurrent = false;
@@ -518,19 +527,19 @@ export class ProxyClothSolver {
   }
 
   /**
-   * Cloth whose animation sinks into a limb must not come out on the limb's
-   * far side. Pushed out wherever it has drifted to, it can: cloth pinched in
-   * a closed crease (the front of a skirt between a thigh folded up against
-   * the belly) is squeezed back and forth between the two, slides round the
-   * limb and comes out behind it, where nothing pushes it back. So per
+   * In a closed crease (a thigh folded up against the belly, see
+   * `closedSegments`) the front of a skirt is squeezed back and forth between
+   * the two; pushed out wherever it has drifted to, it slides round the
+   * thigh and comes out behind it, where nothing pushes it back. So per
    * particle and round cone this keeps the side the particle's reference
    * entered from, while the reference stays inside, turned with the cone's
-   * axis; the particle may leave anywhere on that half and is sent straight
-   * out of that side if it got round. A limb sweeping through cloth thus
-   * keeps the cloth in front even once it has passed the reference. Where the
-   * reference lies in the colliders of two body segments the crease has
-   * closed on it, and the particle leaves on its reference's own side, back
-   * into the crease (`pinchMask`).
+   * axis. While a crease is closed, a particle may leave anywhere on that half
+   * and is sent straight out of that side if it got round; one whose
+   * reference lies in the colliders of two body segments, one of them a
+   * folded leg, leaves on its reference's own side, back into the crease
+   * (`pinchMask`). With the creases open (a kick, however high) contact is
+   * left as it is: a fast limb meets cloth that lags on its far side, and
+   * sending that cloth to the reference's side would pull it through.
    */
   updateEntrySides(pairs) {
     const K = this.types.length, types = this.types, c = this.colliders, t = this.targets, list = this.pairs, fixed = this.fixed;
@@ -582,10 +591,10 @@ export class ProxyClothSolver {
     }
   }
 
-  /** Whether particle i's reference lies in the colliders of two body segments. */
+  /** Whether particle i's reference lies in the colliders of two body segments, one a folded leg. */
   pinched(i) {
     const m = this.pinchMask[i];
-    return (m & (m - 1)) !== 0;
+    return (m & (m - 1)) !== 0 && (m & this.closedSegments & LEG_SEGMENTS) !== 0;
   }
 
   /** Entry record of particle i in cone k for this substep, or -1. */
@@ -632,7 +641,7 @@ export class ProxyClothSolver {
           const side = this.entrySide, f = entry * 3, ex = side[f], ey = side[f + 1], ez = side[f + 2];
           const rd = Math.sqrt(rx * rx + ry * ry + rz * rz);
           if (pinch && rd > 1e-9) { dx = rx; dy = ry; dz = rz; d = rd; }
-          else if (!(dx * ex + dy * ey + dz * ez > 0)) { dx = ex; dy = ey; dz = ez; d = Math.sqrt(ex * ex + ey * ey + ez * ez); }
+          else if (this.closedSegments && !(dx * ex + dy * ey + dz * ez > 0)) { dx = ex; dy = ey; dz = ez; d = Math.sqrt(ex * ex + ey * ey + ez * ez); }
         }
         if (d < 1e-9) {
           // Exactly on the axis: leave towards the side it came from.

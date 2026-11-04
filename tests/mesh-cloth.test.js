@@ -651,18 +651,25 @@ test("cloth pinched in a closed crease stays in it instead of coming out behind 
   // to, the cloth slides round the thigh and comes out on its far side, where
   // nothing pushes it back.
   const solver = new ProxyClothSolver({ count: 2, edges: new Uint32Array([0, 1]), bends: new Uint32Array(0),
-    fixed: new Uint8Array([1, 0]), colliderTypes: [COLLIDER.capsule, COLLIDER.capsule] });
+    fixed: new Uint8Array([1, 0]), colliderTypes: [COLLIDER.capsule, COLLIDER.capsule], colliderLimbs: new Int8Array([1, 0]) });
   const colliders = new Float64Array(2 * COLLIDER_STRIDE);
   colliders.set([-.2, 0, 0, .2, 0, 0, .05, .05]);
   colliders.set([-.2, 0, .06, .2, 0, .06, .05, .05], COLLIDER_STRIDE);
   const targets = new Float64Array([0, .3, .04, 0, 0, .03]);
-  const step = () => solver.step({ targets, normals: null, colliders, radius: new Float64Array([.01, .01]), stiffness: 1,
-    damping: .5, gravity: [0, 0, 0], delta: STEP });
+  // The left thigh (segment 1) is folded against the trunk: its crease is closed.
+  const step = (closedSegments) => solver.step({ targets, normals: null, colliders, radius: new Float64Array([.01, .01]),
+    stiffness: 1, damping: .5, gravity: [0, 0, 0], delta: STEP, closedSegments });
   solver.reset(targets, colliders);
   // Squeezed to just behind the thigh's axis.
   solver.positions.set([0, 0, -.01], 3);
   for (let i = 0; i < 30; i++) {
-    step();
+    step(1 << 1);
     assert.ok(solver.positions[5] > -.03, `step ${i}: the cloth came out behind the thigh (z ${solver.positions[5].toFixed(3)})`);
   }
+  // With the crease open (a kick) contact stays as it was: cloth on the far
+  // side of a fast limb is not pulled through it.
+  solver.reset(targets, colliders);
+  solver.positions.set([0, 0, -.01], 3);
+  step(0);
+  assert.ok(solver.positions[5] < -.05, "cloth was pulled through an open limb");
 });
