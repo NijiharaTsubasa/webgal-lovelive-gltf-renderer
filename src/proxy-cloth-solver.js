@@ -27,9 +27,16 @@ const RESTORE = .25;
 // Limbs thinner than this (shins, feet, arms) can slip between two particles;
 // their contacts also test the edges in between.
 const EDGE_RADIUS = .065;
+// Colliders whose limb is known: edge contact only for the distal limbs that
+// swing into cloth from outside (shins, feet, forearms, hands). Thighs, hips
+// and upper arms meet the cloth at its waist or sleeve, where a deep bend
+// pinches it in the crease and edge contact would only tear it.
+export function edgeContactLimb(name) {
+  return /LowerLeg|Foot|Toes|LowerArm|Hand/.test(name);
+}
 
 export class ProxyClothSolver {
-  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null, rotations = null }) {
+  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null, rotations = null, edgeColliders = null }) {
     // Probes: surface points embedded in up to four particles (CSR by the
     // particle that owns them). Their animated positions (`probeAnchor`) are
     // set per step by the owner; probes collide with the minimum gap.
@@ -85,6 +92,8 @@ export class ProxyClothSolver {
     this.pairs = new Uint32Array(Math.max(2, count * this.types.length * 2));
     this.edgePairs = new Uint32Array(Math.max(2, count * this.types.length * 2));
     this.edgePairCount = 0;
+    // Per collider: 1 edge contact, 0 none, -1 unknown limb (decide by radius).
+    this.edgeColliders = edgeColliders ?? new Int8Array(this.types.length).fill(-1);
 
     this.lastSubsteps = 0;
   }
@@ -96,6 +105,14 @@ export class ProxyClothSolver {
     this.lastColliders.set(colliders);
     this.colliders.set(colliders);
     this.markAuthoredEdges(targets, colliders);
+  }
+
+  /** Whether edges collide with round cone k (pose data c). */
+  edgeContact(k, c) {
+    const flag = this.edgeColliders[k];
+    if (flag >= 0) return flag === 1;
+    const q = k * COLLIDER_STRIDE;
+    return Math.max(c[q + 6], c[q + 7]) < EDGE_RADIUS;
   }
 
   /**
@@ -110,7 +127,7 @@ export class ProxyClothSolver {
     for (let k = 0; k < K; k++) {
       if (types[k] !== COLLIDER.sphere && types[k] !== COLLIDER.capsule) continue;
       const q = k * COLLIDER_STRIDE;
-      if (Math.max(colliders[q + 6], colliders[q + 7]) >= EDGE_RADIUS) continue;
+      if (!this.edgeContact(k, colliders)) continue;
       const ax = colliders[q], ay = colliders[q + 1], az = colliders[q + 2];
       const sx = colliders[q + 3] - ax, sy = colliders[q + 4] - ay, sz = colliders[q + 5] - az;
       const ss = sx * sx + sy * sy + sz * sz, r0 = colliders[q + 6], dr = colliders[q + 7] - r0;
@@ -245,7 +262,7 @@ export class ProxyClothSolver {
         // of the step, keeps it clear without paying for them every substep.
         const probes = s === n && iteration === ITERATIONS - 1;
         if (probes && pairs && this.rotations && normals) {
-          this.rotations.update(x, targets, normals, 2);
+          this.rotations.update(x, targets, 2);
           this.rotationsCurrent = true;
         }
         // The exact body surface (end-of-step pose) once per step, before the
@@ -410,6 +427,11 @@ export class ProxyClothSolver {
     const d2 = nx * nx + ny * ny + nz * nz, limit = R + this.minimumGap;
     if (d2 >= limit * limit) return;
     let d = Math.sqrt(d2);
+    // A limb threading between particles arrives gradually (substeps keep its
+    // step small), so the edge meets it shallow. An edge already deep in a
+    // limb got there with its animation (a skirt bent through the thighs);
+    // dragging it out would tear the cloth against the particle contacts.
+    if (limit - d > .5 * R) return;
     if (d < 1e-9) {
       // On the axis: leave towards the animated edge point.
       nx = t[oa] * g + t[ob] * f - qx; ny = t[oa + 1] * g + t[ob + 1] * f - qy; nz = t[oa + 2] * g + t[ob + 2] * f - qz;
@@ -456,7 +478,7 @@ export class ProxyClothSolver {
     for (let k = 0; k < this.types.length; k++) {
       const bo = k * 6, x0 = b[bo], y0 = b[bo + 1], z0 = b[bo + 2], x1 = b[bo + 3], y1 = b[bo + 4], z1 = b[bo + 5];
       const type = this.types[k], q = k * COLLIDER_STRIDE;
-      const pad = (type === COLLIDER.sphere || type === COLLIDER.capsule) && Math.max(c[q + 6], c[q + 7]) < EDGE_RADIUS ? this.edgeHalf : -1;
+      const pad = (type === COLLIDER.sphere || type === COLLIDER.capsule) && this.edgeContact(k, c) ? this.edgeHalf : -1;
       for (let i = 0, o = 0; i < this.count; i++, o += 3) {
         if (fixed[i]) continue;
         const px = x[o], py = x[o + 1], pz = x[o + 2];

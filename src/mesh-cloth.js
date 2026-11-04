@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { primitiveMesh, morphTerms } from "./cloth-geometry.js";
 import { maximumStretch } from "./physics-math.js";
 import { buildClothProxy } from "./cloth-proxy.js";
-import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE } from "./proxy-cloth-solver.js";
+import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE, edgeContactLimb } from "./proxy-cloth-solver.js";
 import { ProxyRotations, proxyNormals, rotateVector } from "./proxy-rotation.js";
 import { BodySurface } from "./body-surface.js";
 import { HUMANOID_BONE_NAMES } from "./skeleton-composer.js";
@@ -64,9 +64,16 @@ class Cloth {
       this.normalScratch = [0, 0, 0];
       this.rotations = new ProxyRotations(this.proxy);
       this.blendScratch = new Float64Array(4);
+      // The humanoid bone each collider rides on, if any.
+      const limbs = this.colliders.map((r) => {
+        let bone = r.node;
+        while (bone && !HUMANOID_BONE_NAMES.has(bone.name)) bone = bone.parent;
+        return bone?.name;
+      });
       this.solver = new ProxyClothSolver({
         count, edges: this.proxy.edges, bends: this.proxy.bends, fixed: this.proxy.fixed,
         colliderTypes: this.colliders.map((r) => COLLIDER[r.shape]),
+        edgeColliders: Int8Array.from(limbs, (name) => name ? (edgeContactLimb(name) ? 1 : 0) : -1),
         minimumGap: 0, probes: this.proxy.probes, rotations: this.rotations,
       });
       this.position = new THREE.BufferAttribute(this.restPosition.slice(), 3).setUsage(THREE.DynamicDrawUsage);
@@ -361,7 +368,7 @@ class Cloth {
     // lining gap) turns with the blended rotation of those proxies, so stacked
     // layers stay stacked when the cloth swings away from the animation.
     const rotations = this.rotations, q = this.blendScratch, d = this.normalScratch;
-    if (!this.solver.rotationsCurrent) rotations.update(P, T, this.targetNormals, 2);
+    if (!this.solver.rotationsCurrent) rotations.update(P, T, 2);
     this.solver.rotationsCurrent = false;
     for (let a = 0; a < activeNodes.length; a++) {
       const node = activeNodes[a], v = nodeVertex[node], w4 = v * 4, f = node * 3, o = v * 3;

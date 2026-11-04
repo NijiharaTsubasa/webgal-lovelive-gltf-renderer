@@ -5,6 +5,13 @@
  * rotation of those proxies. Pleat depth and lining gaps therefore keep their
  * orientation relative to the cloth when it swings away from the animation.
  */
+// Below SPREAD_MIN the animated neighbourhood is a line: no rotation. Above
+// SPREAD_FULL it is a usable frame: full rotation. Linear in between.
+const SPREAD_MIN = .02, SPREAD_FULL = .08;
+// Larger turns come from crumpled or pinched cloth (a bend pressing the skirt
+// into the hip crease); turning offsets by them throws vertices out.
+const MAX_TURN = Math.PI / 3;
+
 export class ProxyRotations {
   constructor({ count, edges, fixed, triangles, orientation }) {
     const degree = new Uint32Array(count + 1);
@@ -19,24 +26,29 @@ export class ProxyRotations {
     this.quaternions = new Float64Array(count * 4);
     for (let k = 0; k < count; k++) this.quaternions[k * 4 + 3] = 1;
     this.normals = new Float64Array(count * 3);
+    this.targetNormals = new Float64Array(count * 3);
+    this.unsigned = new Float64Array(count).fill(1);
     this.covariance = new Float64Array(9);
   }
 
   /**
    * Shape matching over each proxy's 1-ring plus its normal (so a flat ring
-   * still has a full frame), refined from the previous rotation. Fixed
-   * proxies do not turn.
+   * still has a full frame), refined from the previous rotation. Normals here
+   * are unsigned (triangle winding only): a rotation needs no outside, and
+   * double-sided cloth often has none. Where the animated neighbourhood does
+   * not pin a frame down (a chain of proxies without a normal), the rotation
+   * fades to none instead of drifting. Fixed proxies do not turn.
    */
-  update(P, T, targetNormals, iterations = 4) {
-    const { count, fixed, ring, ringStart: start, covariance: A, quaternions: Q, normals: NP } = this;
-    const NT = targetNormals;
-    proxyNormals(this.triangles, P, NP, this.orientation);
+  update(P, T, iterations = 4) {
+    const { count, fixed, ring, ringStart: start, covariance: A, quaternions: Q, normals: NP, targetNormals: NT, unsigned } = this;
+    proxyNormals(this.triangles, P, NP, unsigned);
+    proxyNormals(this.triangles, T, NT, unsigned);
     for (let k = 0; k < count; k++) {
       const o = k * 4;
       if (fixed[k]) { Q[o] = Q[o + 1] = Q[o + 2] = 0; Q[o + 3] = 1; continue; }
       A.fill(0);
       const k3 = k * 3;
-      let scale = 0;
+      let scale = 0, c00 = 0, c01 = 0, c02 = 0, c11 = 0, c12 = 0, c22 = 0;
       for (let r = start[k]; r < start[k + 1]; r++) {
         const j3 = ring[r] * 3;
         const px = P[j3] - P[k3], py = P[j3 + 1] - P[k3 + 1], pz = P[j3 + 2] - P[k3 + 2];
@@ -44,13 +56,30 @@ export class ProxyRotations {
         A[0] += px * tx; A[1] += py * tx; A[2] += pz * tx;
         A[3] += px * ty; A[4] += py * ty; A[5] += pz * ty;
         A[6] += px * tz; A[7] += py * tz; A[8] += pz * tz;
+        c00 += tx * tx; c01 += tx * ty; c02 += tx * tz; c11 += ty * ty; c12 += ty * tz; c22 += tz * tz;
         scale += tx * tx + ty * ty + tz * tz;
       }
       const nx = NP[k3], ny = NP[k3 + 1], nz = NP[k3 + 2], mx = NT[k3], my = NT[k3 + 1], mz = NT[k3 + 2];
       A[0] += scale * nx * mx; A[1] += scale * ny * mx; A[2] += scale * nz * mx;
       A[3] += scale * nx * my; A[4] += scale * ny * my; A[5] += scale * nz * my;
       A[6] += scale * nx * mz; A[7] += scale * ny * mz; A[8] += scale * nz * mz;
+      c00 += scale * mx * mx; c01 += scale * mx * my; c02 += scale * mx * mz;
+      c11 += scale * my * my; c12 += scale * my * mz; c22 += scale * mz * mz;
       extractRotation(A, Q, o, iterations);
+      // Spread of the animated frame: I2 / I1^2 is 1/3 for a full 3D frame,
+      // about 1/4 for a flat ring and 0 for a line.
+      const i1 = c00 + c11 + c22, i2 = c00 * c11 + c00 * c22 + c11 * c22 - c01 * c01 - c02 * c02 - c12 * c12;
+      const spread = i1 > 1e-20 ? i2 / (i1 * i1) : 0;
+      const confidence = Math.min(1, Math.max(0, (spread - SPREAD_MIN) / (SPREAD_FULL - SPREAD_MIN)));
+      // Cap the turn: |w| = cos(angle / 2).
+      const cap = Math.cos(MAX_TURN / 2), aw = Math.abs(Q[o + 3]);
+      const limited = aw < cap ? Math.min(confidence, angleScale(aw, MAX_TURN)) : confidence;
+      if (limited < 1) {
+        const sign = Q[o + 3] < 0 ? -1 : 1;
+        const x = Q[o] * limited, y = Q[o + 1] * limited, z = Q[o + 2] * limited;
+        const w = Q[o + 3] * limited + sign * (1 - limited), l = Math.sqrt(x * x + y * y + z * z + w * w);
+        Q[o] = x / l; Q[o + 1] = y / l; Q[o + 2] = z / l; Q[o + 3] = w / l;
+      }
     }
   }
 
@@ -74,6 +103,19 @@ export class ProxyRotations {
     else { out[0] = out[1] = out[2] = 0; out[3] = 1; }
     return out;
   }
+}
+
+/** Fraction of a turn (quaternion |w|) that reaches angle `max`, for nlerp towards identity. */
+function angleScale(aw, max) {
+  // Find t with angle(nlerp(identity, q, t)) = max by bisection (monotonic).
+  const angle = 2 * Math.acos(Math.min(1, aw)), s = Math.sqrt(Math.max(0, 1 - aw * aw));
+  if (!(angle > max)) return 1;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 20; i++) {
+    const t = (lo + hi) / 2, w = t * aw + (1 - t), v = t * s;
+    if (2 * Math.atan2(v, w) > max) hi = t; else lo = t;
+  }
+  return lo;
 }
 
 /** Rotate (x, y, z) by unit quaternion q into out. */
