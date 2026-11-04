@@ -109,6 +109,13 @@ class Cloth {
     const nodes = this.topology.vertices.length;
     this.activeNode = new Uint8Array(nodes);
     for (const v of this.active) this.activeNode[this.topology.mapping[v]] = 1;
+    // Each moving node is computed from one of its moving copies (whose
+    // proxy skin is evaluated), never from a pinned copy.
+    this.nodeVertex = Int32Array.from(this.topology.vertices);
+    for (const v of this.active) {
+      const node = this.topology.mapping[v];
+      if (!this.activeVertex[this.nodeVertex[node]]) this.nodeVertex[node] = v;
+    }
     this.activeNodes = Uint32Array.from({ length: nodes }, (_, i) => i).filter((i) => this.activeNode[i]);
     // Normals of active vertices need every welded triangle around them.
     const welded = this.topology.indices, normalTriangles = [], needed = new Uint8Array(nodes);
@@ -342,7 +349,7 @@ class Cloth {
 
   writeGeometry() {
     const P = this.solver.positions, T = this.targets, S = this.skinned, F = this.final;
-    const { indices, weights } = this.proxy.weights, { mapping, vertices } = this.topology;
+    const { indices, weights } = this.proxy.weights, { mapping } = this.topology, nodeVertex = this.nodeVertex;
     const restNormal = this.restNormal, inverse = this.bindingInverse, binding = this.vertexBinding;
     const activeNodes = this.activeNodes, SP = this.proxySkinned, VS = this.vertexSkin;
     // 1. Simulated world position per welded vertex: the proxy-skinned pose
@@ -357,7 +364,7 @@ class Cloth {
     if (!this.solver.rotationsCurrent) rotations.update(P, T, this.targetNormals, 2);
     this.solver.rotationsCurrent = false;
     for (let a = 0; a < activeNodes.length; a++) {
-      const node = activeNodes[a], v = vertices[node], w4 = v * 4, f = node * 3, o = v * 3;
+      const node = activeNodes[a], v = nodeVertex[node], w4 = v * 4, f = node * 3, o = v * 3;
       let px = 0, py = 0, pz = 0, tx = 0, ty = 0, tz = 0;
       for (let k = 0; k < 4; k++) {
         const proxy = indices[w4 + k];
@@ -377,7 +384,7 @@ class Cloth {
     const GS = this.referenceGeometryNormal, GF = this.finalGeometryNormal, R = this.referenceNodes;
     const needed = this.neededNodes, activeNode = this.activeNode;
     for (let i = 0; i < needed.length; i++) {
-      const node = needed[i], f = node * 3, o = vertices[node] * 3;
+      const node = needed[i], f = node * 3, o = nodeVertex[node] * 3;
       if (activeNode[node]) { R[f] = SP[o]; R[f + 1] = SP[o + 1]; R[f + 2] = SP[o + 2]; continue; }
       R[f] = F[f] = S[o]; R[f + 1] = F[f + 1] = S[o + 1]; R[f + 2] = F[f + 2] = S[o + 2];
     }
@@ -389,7 +396,7 @@ class Cloth {
     const morph = this.scratch.point, morphs = this.morphs, mesh = this.mesh, active = this.active;
     for (let a = 0; a < active.length; a++) {
       const v = active[a], o = v * 3, node = mapping[v], f = node * 3, b = binding[v], ib = b * 9, mb = b * 16, q = v * 12;
-      const ex = F[f] - S[vertices[node] * 3], ey = F[f + 1] - S[vertices[node] * 3 + 1], ez = F[f + 2] - S[vertices[node] * 3 + 2];
+      const r = nodeVertex[node] * 3, ex = F[f] - S[r], ey = F[f + 1] - S[r + 1], ez = F[f + 2] - S[r + 2];
       const base = morphs ? morphTerms(mesh, v, "position", morph) : 1;
       out[o] = rest[o] + (inverse[ib] * ex + inverse[ib + 1] * ey + inverse[ib + 2] * ez) / base;
       out[o + 1] = rest[o + 1] + (inverse[ib + 3] * ex + inverse[ib + 4] * ey + inverse[ib + 5] * ez) / base;

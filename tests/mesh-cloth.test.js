@@ -505,6 +505,54 @@ test("cloth authored across a thin limb stays as authored at rest", async () => 
   } finally { sim.destroy(); }
 });
 
+test("a seam fixed on only one of its vertex copies stays put on every copy", async () => {
+  // Non-indexed: every position has a copy per triangle, as at UV seams. The
+  // configuration lists only the first copy of each top-row position.
+  const geometry = new THREE.PlaneGeometry(2, 2, 8, 8).toNonIndexed();
+  const f = fixture({ extra: geometry });
+  const position = geometry.getAttribute("position"), seen = new Set();
+  f.cloth.fixed = [];
+  for (let i = 0; i < position.count; i++) {
+    const key = `${position.getX(i)},${position.getY(i)}`;
+    if (position.getY(i) > 1 - 1e-6 && !seen.has(key)) { seen.add(key); f.cloth.fixed.push(i); }
+  }
+  const sim = await f.create();
+  try {
+    run(f, sim, 30, () => { f.bone.position.x = .05; });
+    const rest = sim.records[0].restPosition;
+    for (let i = 0; i < position.count; i++) {
+      const expected = new THREE.Vector3().fromArray(rest, i * 3).add(new THREE.Vector3(.05, 0, 0));
+      const error = world(f.mesh, i).distanceTo(expected);
+      assert.ok(error < 1e-4, `vertex ${i} at ${position.getX(i).toFixed(2)},${position.getY(i).toFixed(2)} is ${(error * 1000).toFixed(1)} mm off`);
+    }
+  } finally { sim.destroy(); }
+});
+
+test("explicit proxy groups are kept apart even for coincident vertices", async () => {
+  // Two copies of one position assigned to different source groups (as a
+  // converter may when a vertex sits on a group boundary): both groups stay.
+  const geometry = new THREE.PlaneGeometry(2, 2, 8, 8).toNonIndexed();
+  const f = fixture({ extra: geometry });
+  const position = geometry.getAttribute("position");
+  const block = (i) => Math.min(1, Math.floor((position.getX(i) + 1) / 1)) + 2 * Math.min(1, Math.floor((1 - position.getY(i)) / 1));
+  const groups = Array.from({ length: position.count }, (_, i) => block(i));
+  // A copy at the centre column, mid height, joins the neighbouring block.
+  const copies = [];
+  for (let i = 0; i < position.count; i++) if (Math.abs(position.getX(i)) < 1e-6 && Math.abs(position.getY(i) + .5) < 1e-6) copies.push(i);
+  assert.ok(copies.length >= 2);
+  const other = groups[copies[0]] ^ 1;
+  groups[copies[1]] = other;
+  f.cloth.proxy = { vertices: groups };
+  const sim = await f.create();
+  try {
+    const { renderCluster } = sim.records[0].proxy;
+    assert.notEqual(renderCluster[copies[0]], renderCluster[copies[1]], "the two source groups were merged");
+    run(f, sim, 10);
+    const rest = sim.records[0].restPosition;
+    for (const i of copies) assert.ok(world(f.mesh, i).distanceTo(new THREE.Vector3().fromArray(rest, i * 3)) < 1e-4, `copy ${i} left its rest pose`);
+  } finally { sim.destroy(); }
+});
+
 /** A skinned sphere mesh of the given radius following `bone`, as a body part. */
 function bodySphere(root, bone, radius) {
   const geometry = new THREE.SphereGeometry(radius, 48, 24);

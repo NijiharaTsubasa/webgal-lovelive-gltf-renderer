@@ -18,7 +18,7 @@ const SPACING = 2.7;
  * vertex. Without it the clustering is derived here from the rest mesh.
  */
 export function buildClothProxy(geometry, fixed, proxy, { spacing } = {}) {
-  const topology = clothTopology(geometry, fixed);
+  const topology = clothTopology(geometry, fixed, Array.isArray(proxy?.vertices) ? proxy.vertices : null);
   const position = geometry.getAttribute("position");
   const nodes = topology.vertices.length;
   const nodePosition = new Float64Array(nodes * 3);
@@ -57,8 +57,10 @@ export function buildClothProxy(geometry, fixed, proxy, { spacing } = {}) {
   const renderCluster = new Int32Array(position.count).fill(-1);
   for (const i of used) renderCluster[i] = nodeCluster[topology.mapping[i]];
 
+  // Fixed per welded node: every copy of a seam vertex follows the copy the
+  // configuration pinned, or the copies would be pulled apart.
   const fixedVertex = new Uint8Array(position.count);
-  for (const i of fixed) fixedVertex[i] = 1;
+  for (const i of used) fixedVertex[i] = nodeFixed[topology.mapping[i]];
   const weights = kernelWeights(position, used, renderCluster, rest, adjacency, fixedVertex);
   // Authored render normals say which side is outside. Proxy triangles merge
   // both faces of thin or double-sided cloth, so their winding cannot; orient
