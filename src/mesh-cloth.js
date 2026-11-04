@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { primitiveMesh, morphTerms } from "./cloth-geometry.js";
 import { maximumStretch } from "./physics-math.js";
 import { buildClothProxy } from "./cloth-proxy.js";
-import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE, edgeContactLimb } from "./proxy-cloth-solver.js";
+import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE, edgeContactLimb, limbSegment } from "./proxy-cloth-solver.js";
 import { ProxyRotations, proxyNormals, rotateVector } from "./proxy-rotation.js";
 import { BodySurface } from "./body-surface.js";
 import { HUMANOID_BONE_NAMES } from "./skeleton-composer.js";
@@ -74,6 +74,7 @@ class Cloth {
         count, edges: this.proxy.edges, bends: this.proxy.bends, fixed: this.proxy.fixed,
         colliderTypes: this.colliders.map((r) => COLLIDER[r.shape]),
         edgeColliders: Int8Array.from(limbs, (name) => name ? (edgeContactLimb(name) ? 1 : 0) : -1),
+        colliderLimbs: Int8Array.from(limbs, (name) => name ? limbSegment(name) : -1),
         minimumGap: 0, probes: this.proxy.probes, rotations: this.rotations,
       });
       this.position = new THREE.BufferAttribute(this.restPosition.slice(), 3).setUsage(THREE.DynamicDrawUsage);

@@ -27,6 +27,14 @@ const RESTORE = .25;
 // Limbs thinner than this (shins, feet, arms) can slip between two particles;
 // their contacts also test the edges in between.
 const EDGE_RADIUS = .065;
+/** Body segment of a humanoid bone: 0 trunk and head, 1/2 left/right leg, 3/4 left/right arm. */
+export function limbSegment(name) {
+  const leg = /UpperLeg|LowerLeg|Foot|Toes/.test(name);
+  const arm = !leg && /Shoulder|UpperArm|LowerArm|Hand|Thumb|Index|Middle|Ring|Little/.test(name);
+  if (!leg && !arm) return 0;
+  return (leg ? 1 : 3) + (name.startsWith("Right") ? 1 : 0);
+}
+
 // Colliders whose limb is known: edge contact only for the distal limbs that
 // swing into cloth from outside (shins, feet, forearms, hands). Thighs, hips
 // and upper arms meet the cloth at its waist or sleeve, where a deep bend
@@ -36,7 +44,7 @@ export function edgeContactLimb(name) {
 }
 
 export class ProxyClothSolver {
-  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null, rotations = null, edgeColliders = null }) {
+  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null, rotations = null, edgeColliders = null, colliderLimbs = null }) {
     // Probes: surface points embedded in up to four particles (CSR by the
     // particle that owns them). Their animated positions (`probeAnchor`) are
     // set per step by the owner; probes collide with the minimum gap.
@@ -94,6 +102,19 @@ export class ProxyClothSolver {
     this.edgePairCount = 0;
     // Per collider: 1 edge contact, 0 none, -1 unknown limb (decide by radius).
     this.edgeColliders = edgeColliders ?? new Int8Array(this.types.length).fill(-1);
+    const K = this.types.length;
+    // Per collider: body segment (limbSegment), -1 unknown; per particle: the
+    // segments whose colliders hold its reference (bit mask, this substep).
+    this.colliderLimbs = colliderLimbs ?? new Int8Array(K).fill(-1);
+    this.pinchMask = new Uint8Array(count);
+    // Per particle and round cone: the side its reference entered from
+    // (unit vector), valid while `entryStamp` holds the current substep.
+    this.entrySide = new Float32Array(count * K * 3);
+    this.entryStamp = new Uint32Array(count * K);
+    this.substepCount = 1;
+    // Per cone: last substep's unit axis, and the turn from it to this one's.
+    this.axisLast = new Float64Array(K * 3);
+    this.axisTurn = new Float64Array(K * 4);
 
     this.lastSubsteps = 0;
   }
@@ -105,6 +126,8 @@ export class ProxyClothSolver {
     this.lastColliders.set(colliders);
     this.colliders.set(colliders);
     this.markAuthoredEdges(targets, colliders);
+    this.entryStamp.fill(0);
+    this.axisLast.fill(0);
   }
 
   /** Whether edges collide with round cone k (pose data c). */
@@ -234,6 +257,7 @@ export class ProxyClothSolver {
       // A body surface reaches a little past its colliders (BODY_REACH).
       this.updateBounds(maxRadius + CONTACT_SLACK + this.contactMargin + (body ? BODY_REACH : 0));
       const pairs = this.contactCandidates();
+      this.updateEntrySides(pairs);
       restLengths(this.edges, t, this.edgeRest);
       if (s === 1) {
         let longest = 0;
@@ -270,7 +294,7 @@ export class ProxyClothSolver {
         if (probes && pairs) this.indexPairs(pairs, radius, t, body);
         for (let p = 0; p < pairs; p += 2) {
           const i = this.pairs[p], k = this.pairs[p + 1];
-          this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3);
+          this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3, this.entry(i, k), this.pinched(i));
         }
         if (this.edgePairCount && iteration === ITERATIONS - 1) this.collideEdges(this.edgePairCount, radius, t);
         if (probes && pairs) this.probePass(radius, t, body);
@@ -339,7 +363,8 @@ export class ProxyClothSolver {
         px += d[0]; py += d[1]; pz += d[2];
         point[0] = px; point[1] = py; point[2] = pz; ref[0] = rx; ref[1] = ry; ref[2] = rz;
         if (body) body.collide(point, 0, gap, ref, 0, this.clearanceGap);
-        for (let c = c0; c < c1; c++) this.collideWith(byParticle[c], point, 0, gap, ref, null, 0);
+        const pinch = this.pinched(i);
+        for (let c = c0; c < c1; c++) this.collideWith(byParticle[c], point, 0, gap, ref, null, 0, this.entry(i, byParticle[c]), pinch);
         const dx = point[0] - px, dy = point[1] - py, dz = point[2] - pz;
         if (!dx && !dy && !dz) continue;
         for (let j = p * 4; j < p * 4 + 4; j++) {
@@ -493,11 +518,88 @@ export class ProxyClothSolver {
   }
 
   /**
+   * Cloth whose animation sinks into a limb must not come out on the limb's
+   * far side. Pushed out wherever it has drifted to, it can: cloth pinched in
+   * a closed crease (the front of a skirt between a thigh folded up against
+   * the belly) is squeezed back and forth between the two, slides round the
+   * limb and comes out behind it, where nothing pushes it back. So per
+   * particle and round cone this keeps the side the particle's reference
+   * entered from, while the reference stays inside, turned with the cone's
+   * axis; the particle may leave anywhere on that half and is sent straight
+   * out of that side if it got round. A limb sweeping through cloth thus
+   * keeps the cloth in front even once it has passed the reference. Where the
+   * reference lies in the colliders of two body segments the crease has
+   * closed on it, and the particle leaves on its reference's own side, back
+   * into the crease (`pinchMask`).
+   */
+  updateEntrySides(pairs) {
+    const K = this.types.length, types = this.types, c = this.colliders, t = this.targets, list = this.pairs, fixed = this.fixed;
+    const side = this.entrySide, stamp = this.entryStamp, axis = this.axisLast, turn = this.axisTurn;
+    const limbs = this.colliderLimbs, mask = this.pinchMask;
+    const now = ++this.substepCount;
+    mask.fill(0);
+    for (let k = 0; k < K; k++) {
+      const q = k * COLLIDER_STRIDE, a = k * 3, w = k * 4;
+      turn[w] = turn[w + 1] = turn[w + 2] = 0; turn[w + 3] = 1;
+      if (types[k] !== COLLIDER.capsule) continue;
+      let sx = c[q + 3] - c[q], sy = c[q + 4] - c[q + 1], sz = c[q + 5] - c[q + 2];
+      const l = Math.sqrt(sx * sx + sy * sy + sz * sz);
+      if (l < 1e-9) continue;
+      sx /= l; sy /= l; sz /= l;
+      const px = axis[a], py = axis[a + 1], pz = axis[a + 2], dot = px * sx + py * sy + pz * sz;
+      axis[a] = sx; axis[a + 1] = sy; axis[a + 2] = sz;
+      if (!(px || py || pz) || dot < -.999) continue;
+      // Shortest arc from the last axis to this one.
+      const qx = py * sz - pz * sy, qy = pz * sx - px * sz, qz = px * sy - py * sx, qw = 1 + dot;
+      const n = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+      turn[w] = qx / n; turn[w + 1] = qy / n; turn[w + 2] = qz / n; turn[w + 3] = qw / n;
+    }
+    for (let p = 0; p < pairs; p += 2) {
+      const i = list[p], k = list[p + 1];
+      if (fixed[i] || (types[k] !== COLLIDER.sphere && types[k] !== COLLIDER.capsule)) continue;
+      const q = k * COLLIDER_STRIDE, o = i * 3, e = i * K + k, f = e * 3;
+      const ax = c[q], ay = c[q + 1], az = c[q + 2], r0 = c[q + 6], dr = c[q + 7] - r0;
+      const sx = c[q + 3] - ax, sy = c[q + 4] - ay, sz = c[q + 5] - az, ss = sx * sx + sy * sy + sz * sz;
+      const slope2 = ss > 0 ? dr * dr / ss : 0, shift = slope2 < .99 ? dr / Math.sqrt(1 - slope2) : 0;
+      const u = touchParameter(t[o], t[o + 1], t[o + 2], ax, ay, az, sx, sy, sz, ss, shift), R = r0 + dr * u;
+      const dx = t[o] - ax - sx * u, dy = t[o + 1] - ay - sy * u, dz = t[o + 2] - az - sz * u;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= R * R) { stamp[e] = 0; continue; }
+      if (limbs[k] >= 0) mask[i] |= 1 << limbs[k];
+      if (stamp[e] === now - 1) {
+        const w = k * 4, qx = turn[w], qy = turn[w + 1], qz = turn[w + 2], qw = turn[w + 3];
+        const vx = side[f], vy = side[f + 1], vz = side[f + 2];
+        const cx = qy * vz - qz * vy, cy = qz * vx - qx * vz, cz = qx * vy - qy * vx;
+        side[f] = vx + 2 * (qw * cx + qy * cz - qz * cy);
+        side[f + 1] = vy + 2 * (qw * cy + qz * cx - qx * cz);
+        side[f + 2] = vz + 2 * (qw * cz + qx * cy - qy * cx);
+      } else {
+        const d = Math.sqrt(d2);
+        if (d < 1e-9) { stamp[e] = 0; continue; }
+        side[f] = dx / d; side[f + 1] = dy / d; side[f + 2] = dz / d;
+      }
+      stamp[e] = now;
+    }
+  }
+
+  /** Whether particle i's reference lies in the colliders of two body segments. */
+  pinched(i) {
+    const m = this.pinchMask[i];
+    return (m & (m - 1)) !== 0;
+  }
+
+  /** Entry record of particle i in cone k for this substep, or -1. */
+  entry(i, k) {
+    const e = i * this.types.length + k;
+    return this.entryStamp[e] === this.substepCount ? e : -1;
+  }
+
+  /**
    * Keep point `o` of `x` a distance `r` away from collider k. Where its
    * animated reference (`ro` in `ref`) is closer than `r` but clear of the
    * body, it stays as authored; see `clearance` for references that sink in.
    */
-  collideWith(k, x, o, r, ref, prev, ro) {
+  collideWith(k, x, o, r, ref, prev, ro, entry = -1, pinch = false) {
     const c = this.colliders, types = this.types, gap = this.minimumGap;
     {
       const q = k * COLLIDER_STRIDE, type = types[k];
@@ -525,6 +627,13 @@ export class ProxyClothSolver {
         if (reference < limit) limit = R + clearance(reference - R, r, gap);
         if (d2 >= limit * limit) return;
         let d = Math.sqrt(d2);
+        if (entry >= 0 && reference < R) {
+          // The animated cloth sank in (see updateEntrySides).
+          const side = this.entrySide, f = entry * 3, ex = side[f], ey = side[f + 1], ez = side[f + 2];
+          const rd = Math.sqrt(rx * rx + ry * ry + rz * rz);
+          if (pinch && rd > 1e-9) { dx = rx; dy = ry; dz = rz; d = rd; }
+          else if (!(dx * ex + dy * ey + dz * ez > 0)) { dx = ex; dy = ey; dz = ez; d = Math.sqrt(ex * ex + ey * ey + ez * ez); }
+        }
         if (d < 1e-9) {
           // Exactly on the axis: leave towards the side it came from.
           if (prev) { dx = prev[ro] - qx; dy = prev[ro + 1] - qy; dz = prev[ro + 2] - qz; d = Math.sqrt(dx * dx + dy * dy + dz * dz); }
