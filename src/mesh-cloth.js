@@ -5,6 +5,8 @@ import { buildClothProxy } from "./cloth-proxy.js";
 import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE } from "./proxy-cloth-solver.js";
 export { clothTopology, vertexSkinMatrix } from "./cloth-geometry.js";
 const STEP = 1 / 60;
+// Column-major Matrix4 elements holding the affine 3x4 part.
+const AFFINE = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14];
 // A particle may leave its animated position by at most this fraction of its
 // rest distance (along the cloth) from the nearest fixed particle.
 const MAX_DISTANCE = .5;
@@ -12,12 +14,15 @@ const MAX_DISTANCE = .5;
 /**
  * Mesh cloth driven by a reduced proxy surface.
  *
- * Only the sparse proxy particles are simulated. Every render vertex keeps its
- * own animated skinning S and adds the interpolated displacement of up to four
- * proxies: S + sum_i w_i (P_i - T_i), with P_i simulated and T_i animated. At
- * rest (P = T) this is exactly the original skinned mesh, so the cloth never
- * drifts from the authored shape. Normals and tangents turn with the change of
- * the render surface itself, keeping their authored smoothing.
+ * Only the sparse proxy particles are simulated. As in Magica Cloth, moving
+ * render vertices follow their proxies rather than their own bone weights: a
+ * proxy carries the mean skin of its members, a vertex blends the skins of up
+ * to four proxies (S'), then adds their interpolated simulation displacement:
+ * S' + sum_i w_i (P_i - T_i), with P_i simulated and T_i animated. Layers that
+ * share proxies therefore keep their arrangement; declared fixed vertices and
+ * fixed regions away from the moving cloth keep their exact skinning. Normals
+ * and tangents turn with the change of the render surface itself, keeping
+ * their authored smoothing.
  */
 class Cloth {
   constructor(root, definition, physics, resolve, resolvePrimitive) {
@@ -48,6 +53,7 @@ class Cloth {
       this.maxDistance = new Float64Array(count);
       this.colliderData = new Float64Array(this.colliders.length * COLLIDER_STRIDE);
       this.renderPoint = new Float64Array(3);
+      this.normalScratch = [0, 0, 0];
       this.solver = new ProxyClothSolver({
         count, edges: this.proxy.edges, bends: this.proxy.bends, fixed: this.proxy.fixed,
         colliderTypes: this.colliders.map((r) => COLLIDER[r.shape]),
@@ -140,6 +146,11 @@ class Cloth {
     }
     this.morphs = (this.geometry.morphAttributes.position?.length ?? 0) > 0;
     this.skinned = new Float64Array(this.sourcePosition.count * 3);
+    // Moving vertices follow their proxies' skinning: affine 3x4 per vertex
+    // (column-major xyz of the 4 columns) and the resulting positions.
+    this.proxySkin = new Float64Array(this.proxy.count * 12);
+    this.vertexSkin = new Float64Array(this.sourcePosition.count * 12);
+    this.proxySkinned = new Float64Array(this.sourcePosition.count * 3);
   }
 
   prepareSkin() {
@@ -226,6 +237,39 @@ class Cloth {
       const n = end - start;
       T[c * 3] = x / n; T[c * 3 + 1] = y / n; T[c * 3 + 2] = z / n;
     }
+    // Proxy skinning, as in Magica's reduced mesh: a proxy moves with the mean
+    // skin of the vertices merged into it, and moving render vertices follow
+    // their proxies instead of their own bone weights. Layers merged into the
+    // same proxies (outer fabric, lining, frills) therefore stay together even
+    // where their individual weights would drag one through the other.
+    const PS = this.proxySkin, VS = this.vertexSkin, SP = this.proxySkinned, binding = this.vertexBinding;
+    PS.fill(0);
+    for (let c = 0; c < count; c++) {
+      const start = memberStart[c], end = memberStart[c + 1], scale = 1 / (end - start), q = c * 12;
+      for (let k = start; k < end; k++) {
+        const o = binding[members[k]] * 16;
+        for (let j = 0; j < 12; j++) PS[q + j] += m[o + AFFINE[j]] * scale;
+      }
+    }
+    const { indices: proxyIndex, weights: proxyWeight } = this.proxy.weights, active = this.active;
+    for (let a = 0; a < active.length; a++) {
+      const v = active[a], q = v * 12;
+      for (let j = 0; j < 12; j++) VS[q + j] = 0;
+      for (let k = 0; k < 4; k++) {
+        const proxy = proxyIndex[v * 4 + k];
+        if (proxy < 0) break;
+        const w = proxyWeight[v * 4 + k], c = proxy * 12;
+        for (let j = 0; j < 12; j++) VS[q + j] += PS[c + j] * w;
+      }
+      let x = rest[v * 3], y = rest[v * 3 + 1], z = rest[v * 3 + 2];
+      if (this.morphs) {
+        const base = morphTerms(mesh, v, "position", morph);
+        x = x * base + morph.x; y = y * base + morph.y; z = z * base + morph.z;
+      }
+      SP[v * 3] = VS[q] * x + VS[q + 3] * y + VS[q + 6] * z + VS[q + 9];
+      SP[v * 3 + 1] = VS[q + 1] * x + VS[q + 4] * y + VS[q + 7] * z + VS[q + 10];
+      SP[v * 3 + 2] = VS[q + 2] * x + VS[q + 5] * y + VS[q + 8] * z + VS[q + 11];
+    }
     proxyNormals(this.proxy.triangles, T, this.targetNormals, this.proxy.orientation);
     const scale = maximumStretch(mesh.matrixWorld);
     // Contact radius: the cloth gap plus how far member vertices sit behind
@@ -296,14 +340,13 @@ class Cloth {
     const { indices, weights } = this.proxy.weights, { mapping, vertices } = this.topology;
     const restNormal = this.restNormal, inverse = this.bindingInverse, binding = this.vertexBinding;
     const solver = this.solver, gap = solver.minimumGap, near = solver.near, point = this.renderPoint;
-    const activeNodes = this.activeNodes, nodeNormal = this.nodeNormal;
-    // 1. Simulated world position per welded vertex. Positions follow the
-    // proxies by translation only: sum_i w_i (P_i - T_i) is a smooth field,
-    // whereas per-proxy rotations of a sparse surface are too noisy for
-    // pleats and layered fabric.
+    const activeNodes = this.activeNodes, nodeNormal = this.nodeNormal, SP = this.proxySkinned, VS = this.vertexSkin;
+    // 1. Simulated world position per welded vertex: the proxy-skinned pose
+    // plus the interpolated simulation displacement sum_i w_i (P_i - T_i).
+    // Displacements, not per-proxy rotations, keep pleats and layers smooth.
     for (let a = 0; a < activeNodes.length; a++) {
-      const node = activeNodes[a], v = vertices[node], o = v * 3, w4 = v * 4, f = node * 3;
-      const sx = S[o], sy = S[o + 1], sz = S[o + 2];
+      const node = activeNodes[a], v = vertices[node], o = v * 3, w4 = v * 4, f = node * 3, q = v * 12;
+      const sx = SP[o], sy = SP[o + 1], sz = SP[o + 2];
       let fx = sx, fy = sy, fz = sz, contact = 0;
       for (let k = 0; k < 4; k++) {
         const proxy = indices[w4 + k];
@@ -314,10 +357,7 @@ class Cloth {
       }
       // Like the proxies, a render vertex never folds behind its own animated
       // surface: the artist's skinned pose already clears the body there.
-      const ib = binding[v] * 9, rx = nodeNormal[f], ry = nodeNormal[f + 1], rz = nodeNormal[f + 2];
-      const nx = inverse[ib] * rx + inverse[ib + 3] * ry + inverse[ib + 6] * rz;
-      const ny = inverse[ib + 1] * rx + inverse[ib + 4] * ry + inverse[ib + 7] * rz;
-      const nz = inverse[ib + 2] * rx + inverse[ib + 5] * ry + inverse[ib + 8] * rz;
+      const [nx, ny, nz] = cofactorApply(VS, q, nodeNormal[f], nodeNormal[f + 1], nodeNormal[f + 2], this.normalScratch);
       const nn = nx * nx + ny * ny + nz * nz;
       if (nn > 1e-30) {
         const behind = (fx - sx) * nx + (fy - sy) * ny + (fz - sz) * nz;
@@ -327,7 +367,7 @@ class Cloth {
       // between or behind those proxies get the same minimum clearance.
       if (contact) {
         point[0] = fx; point[1] = fy; point[2] = fz;
-        solver.collidePoint(point, 0, gap, S, null, o, contact);
+        solver.collidePoint(point, 0, gap, SP, null, o, contact);
         fx = point[0]; fy = point[1]; fz = point[2];
       }
       if (!Number.isFinite(fx + fy + fz)) throw new Error("cloth 求解产生非有限坐标");
@@ -339,8 +379,8 @@ class Cloth {
     const needed = this.neededNodes, activeNode = this.activeNode;
     for (let i = 0; i < needed.length; i++) {
       const node = needed[i], f = node * 3, o = vertices[node] * 3;
-      R[f] = S[o]; R[f + 1] = S[o + 1]; R[f + 2] = S[o + 2];
-      if (!activeNode[node]) { F[f] = S[o]; F[f + 1] = S[o + 1]; F[f + 2] = S[o + 2]; }
+      if (activeNode[node]) { R[f] = SP[o]; R[f + 1] = SP[o + 1]; R[f + 2] = SP[o + 2]; continue; }
+      R[f] = F[f] = S[o]; R[f + 1] = F[f + 1] = S[o + 1]; R[f + 2] = F[f + 2] = S[o + 2];
     }
     surfaceNormals(this.normalTriangles, R, GS);
     surfaceNormals(this.normalTriangles, F, GF);
@@ -349,7 +389,7 @@ class Cloth {
     const out = this.position.array, outNormal = this.normal.array, outTangent = this.tangent?.array;
     const morph = this.scratch.point, morphs = this.morphs, mesh = this.mesh, active = this.active;
     for (let a = 0; a < active.length; a++) {
-      const v = active[a], o = v * 3, node = mapping[v], f = node * 3, b = binding[v], ib = b * 9, mb = b * 16;
+      const v = active[a], o = v * 3, node = mapping[v], f = node * 3, b = binding[v], ib = b * 9, mb = b * 16, q = v * 12;
       const ex = F[f] - S[vertices[node] * 3], ey = F[f + 1] - S[vertices[node] * 3 + 1], ez = F[f + 2] - S[vertices[node] * 3 + 2];
       const base = morphs ? morphTerms(mesh, v, "position", morph) : 1;
       out[o] = rest[o] + (inverse[ib] * ex + inverse[ib + 1] * ey + inverse[ib + 2] * ez) / base;
@@ -357,20 +397,13 @@ class Cloth {
       out[o + 2] = rest[o + 2] + (inverse[ib + 6] * ex + inverse[ib + 7] * ey + inverse[ib + 8] * ez) / base;
       // Shortest-arc turn from the animated to the simulated surface normal.
       const ax = GS[f], ay = GS[f + 1], az = GS[f + 2], bx = GF[f], by = GF[f + 1], bz = GF[f + 2];
-      const cos = ax * bx + ay * by + az * bz;
-      if (!(cos > -.999) || cos > 1 - 1e-12) {
-        if (outNormal[o] !== restNormal[o] || outNormal[o + 1] !== restNormal[o + 1] || outNormal[o + 2] !== restNormal[o + 2]) {
-          outNormal[o] = restNormal[o]; outNormal[o + 1] = restNormal[o + 1]; outNormal[o + 2] = restNormal[o + 2];
-          if (restTangent) for (let k = 0; k < 3; k++) outTangent[v * 4 + k] = restTangent[v * 4 + k];
-        }
-        continue;
-      }
-      const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx, h = 1 / (1 + cos);
-      // Skinned world normal L^-T n (L^-1 row-major), turned, then back: L^T n'.
-      const rx = restNormal[o], ry = restNormal[o + 1], rz = restNormal[o + 2];
-      const nx = inverse[ib] * rx + inverse[ib + 3] * ry + inverse[ib + 6] * rz;
-      const ny = inverse[ib + 1] * rx + inverse[ib + 4] * ry + inverse[ib + 7] * rz;
-      const nz = inverse[ib + 2] * rx + inverse[ib + 5] * ry + inverse[ib + 8] * rz;
+      let cos = ax * bx + ay * by + az * bz;
+      if (!(cos > -.999)) cos = 1;
+      const turn = cos < 1 - 1e-12;
+      const cx = turn ? ay * bz - az * by : 0, cy = turn ? az * bx - ax * bz : 0, cz = turn ? ax * by - ay * bx : 0, h = 1 / (1 + cos);
+      // Proxy-skinned world normal (inverse transpose of its blend), turned,
+      // then into render-local space through this vertex's own skin: L^T n'.
+      const [nx, ny, nz] = cofactorApply(VS, q, restNormal[o], restNormal[o + 1], restNormal[o + 2], this.normalScratch);
       let d = (cx * nx + cy * ny + cz * nz) * h;
       const tx = nx * cos + (cy * nz - cz * ny) + cx * d;
       const ty = ny * cos + (cz * nx - cx * nz) + cy * d;
@@ -390,9 +423,9 @@ class Cloth {
       if (restTangent) {
         // Tangents transform with L; turn them by the same rotation.
         const w4 = v * 4, qx = restTangent[w4], qy = restTangent[w4 + 1], qz = restTangent[w4 + 2];
-        const wx = m[mb] * qx + m[mb + 4] * qy + m[mb + 8] * qz;
-        const wy = m[mb + 1] * qx + m[mb + 5] * qy + m[mb + 9] * qz;
-        const wz = m[mb + 2] * qx + m[mb + 6] * qy + m[mb + 10] * qz;
+        const wx = VS[q] * qx + VS[q + 3] * qy + VS[q + 6] * qz;
+        const wy = VS[q + 1] * qx + VS[q + 4] * qy + VS[q + 7] * qz;
+        const wz = VS[q + 2] * qx + VS[q + 5] * qy + VS[q + 8] * qz;
         d = (cx * wx + cy * wy + cz * wz) * h;
         const ux = wx * cos + (cy * wz - cz * wy) + cx * d;
         const uy = wy * cos + (cz * wx - cx * wz) + cy * d;
@@ -504,6 +537,24 @@ function proxyNormals(triangles, positions, out, orientation) {
     const l = Math.sqrt(out[i] * out[i] + out[i + 1] * out[i + 1] + out[i + 2] * out[i + 2]);
     if (l > 1e-20) { const k = orientation[i / 3] / l; out[i] *= k; out[i + 1] *= k; out[i + 2] *= k; }
   }
+}
+
+/**
+ * Cofactor (inverse transpose up to scale) of the linear part of the affine
+ * 3x4 skin at `q`, applied to normal (x, y, z). Mirrored skins keep facing.
+ */
+function cofactorApply(skin, q, x, y, z, out) {
+  const a00 = skin[q], a10 = skin[q + 1], a20 = skin[q + 2];
+  const a01 = skin[q + 3], a11 = skin[q + 4], a21 = skin[q + 5];
+  const a02 = skin[q + 6], a12 = skin[q + 7], a22 = skin[q + 8];
+  const c00 = a11 * a22 - a12 * a21, c01 = a12 * a20 - a10 * a22, c02 = a10 * a21 - a11 * a20;
+  const c10 = a02 * a21 - a01 * a22, c11 = a00 * a22 - a02 * a20, c12 = a01 * a20 - a00 * a21;
+  const c20 = a01 * a12 - a02 * a11, c21 = a02 * a10 - a00 * a12, c22 = a00 * a11 - a01 * a10;
+  const sign = a00 * c00 + a01 * c01 + a02 * c02 < 0 ? -1 : 1;
+  out[0] = sign * (c00 * x + c01 * y + c02 * z);
+  out[1] = sign * (c10 * x + c11 * y + c12 * z);
+  out[2] = sign * (c20 * x + c21 * y + c22 * z);
+  return out;
 }
 
 /** Area-weighted vertex normals of a triangle list over node positions. */

@@ -185,10 +185,9 @@ export class ProxyClothSolver {
   }
 
   /**
-   * Keep a point `r` away from every collider, but never push it farther out
-   * than its animated reference `ref` already is (down to the minimum gap).
-   * Artist poses resting inside a thick particle radius stay as authored; the
-   * cloth just cannot sink deeper than its own animation.
+   * Keep a point `r` away from every collider. Where its animated reference
+   * `ref` is closer than `r` but clear of the body, it stays as authored; see
+   * `clearance` for references that sink into the collider.
    */
   collidePoint(x, o, r, ref, prev, ro = o, mask = 0xffffffff) {
     const b = this.bounds;
@@ -240,7 +239,7 @@ export class ProxyClothSolver {
         const rx = ref[ro] - ax - sx * ut, ry = ref[ro + 1] - ay - sy * ut, rz = ref[ro + 2] - az - sz * ut;
         // Reference clearance from its own touching sphere.
         const reference = Math.sqrt(rx * rx + ry * ry + rz * rz) - dr * ut + dr * u;
-        if (reference < limit) limit = reference > R + gap ? reference : R + gap;
+        if (reference < limit) limit = R + clearance(reference - R, r, gap);
         if (d2 >= limit * limit) return;
         let d = Math.sqrt(d2);
         if (d < 1e-9) {
@@ -257,7 +256,7 @@ export class ProxyClothSolver {
         const w = ((x[o] - c[q]) * nx + (x[o + 1] - c[q + 1]) * ny + (x[o + 2] - c[q + 2]) * nz) / l;
         if (w >= r) return;
         const wt = ((ref[ro] - c[q]) * nx + (ref[ro + 1] - c[q + 1]) * ny + (ref[ro + 2] - c[q + 2]) * nz) / l;
-        const limit = wt < r ? (wt > gap ? wt : gap) : r;
+        const limit = wt < r ? clearance(wt, r, gap) : r;
         if (w >= limit) return;
         const push = (limit - w) / l;
         x[o] += nx * push; x[o + 1] += ny * push; x[o + 2] += nz * push;
@@ -311,6 +310,20 @@ export class ProxyClothSolver {
       x[o] += nx * push; x[o + 1] += ny * push; x[o + 2] += nz * push;
     }
   }
+}
+
+/**
+ * Required clearance from a collider surface, given the animated reference's
+ * own clearance `reference`. A reference between the gap and the full radius
+ * `r` is kept as authored (no puffing at rest). A reference that already sinks
+ * into the collider means the animation itself clips: push out towards the full
+ * radius, so the layers behind the particle clear the body too. The ramp keeps
+ * the limit continuous as the animation moves through the surface.
+ */
+function clearance(reference, r, gap) {
+  if (reference >= gap) return reference < r ? reference : r;
+  const depth = (gap - reference) / Math.max(r, 1e-9);
+  return depth >= 1 ? r : gap + (r - gap) * depth;
 }
 
 /** Axis parameter of the sphere of a (tapered) capsule that a point touches. */
