@@ -3,6 +3,9 @@ import { primitiveMesh, morphTerms } from "./cloth-geometry.js";
 import { maximumStretch } from "./physics-math.js";
 import { buildClothProxy } from "./cloth-proxy.js";
 import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE } from "./proxy-cloth-solver.js";
+import { ProxyRotations, proxyNormals, rotateVector } from "./proxy-rotation.js";
+import { BodySurface } from "./body-surface.js";
+import { HUMANOID_BONE_NAMES } from "./skeleton-composer.js";
 export { clothTopology, vertexSkinMatrix } from "./cloth-geometry.js";
 const STEP = 1 / 60;
 // Column-major Matrix4 elements holding the affine 3x4 part.
@@ -10,6 +13,8 @@ const AFFINE = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14];
 // A particle may leave its animated position by at most this fraction of its
 // rest distance (along the cloth) from the nearest fixed particle.
 const MAX_DISTANCE = .5;
+// Bounds pad for skinning the body surface: how far cloth can get in a frame.
+const BODY_BOUNDS_PAD = .15;
 
 /**
  * Mesh cloth driven by a reduced proxy surface.
@@ -28,6 +33,8 @@ class Cloth {
   constructor(root, definition, physics, resolve, resolvePrimitive) {
     this.root = root; this.definition = definition;
     this.physics = physics; this.resolve = resolve;
+    // Shared BodySurface of the character, set by createMeshCloth.
+    this.body = null;
     this.mesh = resolvePrimitive ? resolvePrimitive(definition.node, definition.primitive)
       : primitiveMesh(resolve(definition.node), definition.primitive);
     if (!this.mesh?.isSkinnedMesh) throw new Error("cloth primitive 不是 SkinnedMesh");
@@ -55,10 +62,12 @@ class Cloth {
       this.maxDistance = new Float64Array(count);
       this.colliderData = new Float64Array(this.colliders.length * COLLIDER_STRIDE);
       this.normalScratch = [0, 0, 0];
+      this.rotations = new ProxyRotations(this.proxy);
+      this.blendScratch = new Float64Array(4);
       this.solver = new ProxyClothSolver({
         count, edges: this.proxy.edges, bends: this.proxy.bends, fixed: this.proxy.fixed,
         colliderTypes: this.colliders.map((r) => COLLIDER[r.shape]),
-        minimumGap: 0, probes: this.proxy.probes,
+        minimumGap: 0, probes: this.proxy.probes, rotations: this.rotations,
       });
       this.position = new THREE.BufferAttribute(this.restPosition.slice(), 3).setUsage(THREE.DynamicDrawUsage);
       this.normal = new THREE.BufferAttribute(this.restNormal.slice(), 3).setUsage(THREE.DynamicDrawUsage);
@@ -328,7 +337,7 @@ class Cloth {
     const d = this.definition;
     this.solver.step({ targets: this.targets, normals: this.targetNormals, colliders, radius: this.particleRadius,
       stiffness: d.stiffness, damping: d.damping, gravity: d.gravity, delta: STEP, backstop: 0,
-      maxDistance: this.maxDistance });
+      maxDistance: this.maxDistance, body: this.body });
   }
 
   writeGeometry() {
@@ -341,15 +350,25 @@ class Cloth {
     // Collision clearance is already resolved for this blended surface by the
     // solver's probes; nothing is pushed vertex by vertex here, which would
     // move a lining past the fabric in front of it.
+    // The vertex's offset from its interpolated proxy surface (pleat depth,
+    // lining gap) turns with the blended rotation of those proxies, so stacked
+    // layers stay stacked when the cloth swings away from the animation.
+    const rotations = this.rotations, q = this.blendScratch, d = this.normalScratch;
+    if (!this.solver.rotationsCurrent) rotations.update(P, T, this.targetNormals, 2);
+    this.solver.rotationsCurrent = false;
     for (let a = 0; a < activeNodes.length; a++) {
       const node = activeNodes[a], v = vertices[node], w4 = v * 4, f = node * 3, o = v * 3;
-      let fx = SP[o], fy = SP[o + 1], fz = SP[o + 2];
+      let px = 0, py = 0, pz = 0, tx = 0, ty = 0, tz = 0;
       for (let k = 0; k < 4; k++) {
         const proxy = indices[w4 + k];
         if (proxy < 0) break;
         const w = weights[w4 + k], p = proxy * 3;
-        fx += w * (P[p] - T[p]); fy += w * (P[p + 1] - T[p + 1]); fz += w * (P[p + 2] - T[p + 2]);
+        px += w * P[p]; py += w * P[p + 1]; pz += w * P[p + 2];
+        tx += w * T[p]; ty += w * T[p + 1]; tz += w * T[p + 2];
       }
+      d[0] = SP[o] - tx; d[1] = SP[o + 1] - ty; d[2] = SP[o + 2] - tz;
+      rotateVector(rotations.blend(indices, weights, w4, q), d[0], d[1], d[2], d);
+      const fx = px + d[0], fy = py + d[1], fz = pz + d[2];
       if (!Number.isFinite(fx + fy + fz)) throw new Error("cloth 求解产生非有限坐标");
       F[f] = fx; F[f + 1] = fy; F[f + 2] = fz;
     }
@@ -423,6 +442,19 @@ class Cloth {
     this.updateBounds();
   }
 
+  /** Grow world bounds by this cloth's particles (last step) and their targets, plus pad. */
+  extendBounds(out, pad) {
+    const P = this.solver.positions, T = this.targets;
+    for (const A of [P, T]) {
+      for (let i = 0; i < A.length; i += 3) {
+        for (let k = 0; k < 3; k++) {
+          if (A[i + k] - pad < out[k]) out[k] = A[i + k] - pad;
+          if (A[i + k] + pad > out[k + 3]) out[k + 3] = A[i + k] + pad;
+        }
+      }
+    }
+  }
+
   /** All shader passes share this geometry; keep its bounds valid, cheaply. */
   updateBounds() {
     const array = this.position.array, active = this.active, box = this.staticBounds;
@@ -474,6 +506,49 @@ class Cloth {
  * tapered capsule is both cheaper and smoother: rebuild it, keeping the
  * pieces' conservative envelope (radius linear from first to last piece).
  */
+/**
+ * The character's own surface around the limbs these cloths collide with,
+ * minus what the cloths already cover by design (see BodySurface).
+ */
+function characterBody(root, records) {
+  const poses = records.map((cloth) => ({ cloth, data: cloth.colliderPoses().slice() }));
+  const distance = (point) => {
+    let best = Infinity;
+    for (const { cloth, data } of poses) {
+      cloth.colliders.forEach((collider, k) => {
+        if (collider.shape === "sphere" || collider.shape === "capsule") best = Math.min(best, roundConeDistance(point, data, k * COLLIDER_STRIDE));
+      });
+    }
+    return best;
+  };
+  const cloth = [], point = new THREE.Vector3();
+  for (const { mesh } of records) {
+    mesh.updateWorldMatrix(true, false);
+    for (let i = 0; i < mesh.geometry.getAttribute("position").count; i++) {
+      mesh.getVertexPosition(i, point).applyMatrix4(mesh.matrixWorld);
+      cloth.push(point.x, point.y, point.z);
+    }
+  }
+  const limbs = new Set();
+  for (const record of records) {
+    for (const { node } of record.colliders) {
+      let bone = node;
+      while (bone && !HUMANOID_BONE_NAMES.has(bone.name)) bone = bone.parent;
+      if (bone) limbs.add(bone.name);
+    }
+  }
+  return BodySurface.create(root, new Set(records.map((record) => record.mesh)), distance, cloth, limbs);
+}
+
+/** Distance from a THREE.Vector3 to a round cone (sphere/capsule pose at data[o..]). */
+function roundConeDistance(point, data, o) {
+  const ax = data[o], ay = data[o + 1], az = data[o + 2], sx = data[o + 3] - ax, sy = data[o + 4] - ay, sz = data[o + 5] - az;
+  const ss = sx * sx + sy * sy + sz * sz;
+  let u = ss > 0 ? ((point.x - ax) * sx + (point.y - ay) * sy + (point.z - az) * sz) / ss : 0;
+  u = u < 0 ? 0 : u > 1 ? 1 : u;
+  return Math.hypot(point.x - ax - sx * u, point.y - ay - sy * u, point.z - az - sz * u) - (data[o + 6] + (data[o + 7] - data[o + 6]) * u);
+}
+
 function mergeCapsuleChains(records) {
   const out = [];
   const same = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 1e-7 * Math.max(1, Math.abs(v)));
@@ -501,23 +576,7 @@ function mergeCapsuleChains(records) {
   return out;
 }
 
-/** Area-weighted proxy surface normals for the given positions. */
-function proxyNormals(triangles, positions, out, orientation) {
-  out.fill(0);
-  for (let t = 0; t < triangles.length; t += 3) {
-    const a = triangles[t] * 3, b = triangles[t + 1] * 3, c = triangles[t + 2] * 3;
-    const ux = positions[b] - positions[a], uy = positions[b + 1] - positions[a + 1], uz = positions[b + 2] - positions[a + 2];
-    const vx = positions[c] - positions[a], vy = positions[c + 1] - positions[a + 1], vz = positions[c + 2] - positions[a + 2];
-    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    out[a] += nx; out[a + 1] += ny; out[a + 2] += nz;
-    out[b] += nx; out[b + 1] += ny; out[b + 2] += nz;
-    out[c] += nx; out[c + 1] += ny; out[c + 2] += nz;
-  }
-  for (let i = 0; i < out.length; i += 3) {
-    const l = Math.sqrt(out[i] * out[i] + out[i + 1] * out[i + 1] + out[i + 2] * out[i + 2]);
-    if (l > 1e-20) { const k = orientation[i / 3] / l; out[i] *= k; out[i + 1] *= k; out[i + 2] *= k; }
-  }
-}
+
 
 /**
  * Cofactor (inverse transpose up to scale) of the linear part of the affine
@@ -559,13 +618,21 @@ function surfaceNormals(indices, positions, out) {
 export async function createMeshCloth(root, definitions) {
   const entries = definitions.flatMap(({ physics, resolve, resolvePrimitive }) => (physics.cloths ?? []).map((definition) => ({ definition, physics, resolve, resolvePrimitive })));
   const records = [];
-  let enabled = true;
+  let enabled = true, body = null;
+  const bounds = new Float64Array(6);
   const system = {
     records,
+    get body() { return body; },
     beforeAnimation() { for (const cloth of records) cloth.restore(); },
     update(delta) {
       if (!Number.isFinite(delta) || delta < 0) throw new Error("cloth delta 必须为非负有限数");
       if (!enabled) return;
+      if (body) {
+        // Where this frame's cloth can be: last positions plus a step's reach.
+        bounds.set([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+        for (const cloth of records) cloth.extendBounds(bounds, BODY_BOUNDS_PAD);
+        body.update(bounds);
+      }
       for (const cloth of records) cloth.update(delta);
     },
     reset(warmupSteps = 30) { for (const cloth of records) { cloth.needsReset = true; cloth.accumulator = 0; cloth.warmupSteps = warmupSteps; } },
@@ -584,6 +651,8 @@ export async function createMeshCloth(root, definitions) {
       geometries.add(geometry);
       records.push(new Cloth(root, definition, physics, resolve, resolvePrimitive));
     }
+    body = characterBody(root, records);
+    for (const cloth of records) cloth.body = body;
   } catch (error) { system.destroy(); throw error; }
   return system;
 }

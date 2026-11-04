@@ -470,3 +470,111 @@ test("non-finite animation is rejected before it reaches the geometry", async ()
     assert.throws(() => sim.update(STEP), /非有限|不可逆/);
   } finally { sim.destroy(); }
 });
+
+test("a limb thinner than the particle spacing pushes the fabric instead of threading between particles", async () => {
+  // Every vertex is its own particle, 0.5 m apart; a thin horizontal limb
+  // sweeps through between two rows, touching no particle.
+  const f = fixture({ segments: 4, colliders: [{ shape: "capsule", node: 1, offset: [-.12, 0, 0], radius: .04, tail: { node: 1, offset: [.12, 0, 0] } }] });
+  f.cloth.proxy = { vertices: Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i) };
+  f.collider.position.set(0, -.25, -.3);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60, (i) => f.collider.position.set(0, -.25, -.3 + Math.min(1, i / 30) * .4));
+    // The edge between the particles above and below the limb's path must
+    // have been carried in front of it, not left behind it.
+    const x = sim.records[0].solver.positions, a = vertexAt(f, 0, 0), b = vertexAt(f, 0, -.5);
+    const middle = (x[a * 3 + 2] + x[b * 3 + 2]) / 2;
+    assert.ok(middle > .1 + .04, `the fabric between two particles is ${((.14 - middle) * 1000).toFixed(0)} mm short of clearing the limb`);
+  } finally { sim.destroy(); }
+});
+
+/** A skinned sphere mesh of the given radius following `bone`, as a body part. */
+function bodySphere(root, bone, radius) {
+  const geometry = new THREE.SphereGeometry(radius, 48, 24);
+  const count = geometry.getAttribute("position").count;
+  geometry.setAttribute("skinIndex", new THREE.BufferAttribute(new Uint16Array(count * 4), 4));
+  const weights = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) weights[i * 4] = 1;
+  geometry.setAttribute("skinWeight", new THREE.BufferAttribute(weights, 4));
+  const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial());
+  root.add(mesh); root.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton([bone]));
+  return mesh;
+}
+
+test("cloth clears the body mesh where it bulges out of the limb's collider", async () => {
+  // The collider is 2 cm smaller than the skinned body around it.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .15 }] });
+  const bone = new THREE.Bone(); bone.name = "Hips"; f.root.add(bone); f.nodes[1] = bone;
+  bodySphere(f.root, bone, .17);
+  bone.position.set(0, -.3, -.4);
+  const sim = await f.create();
+  try {
+    assert.ok(sim.body?.count > 0, "the body around the collider was not picked up");
+    run(f, sim, 90, (i) => bone.position.set(0, -.3, -.4 + Math.min(1, i / 45) * .45));
+    const centre = bone.getWorldPosition(new THREE.Vector3());
+    let touched = false;
+    for (const i of moving(f)) {
+      const distance = world(f.mesh, i).distanceTo(centre);
+      assert.ok(distance > .17, `vertex ${i} is ${((.17 - distance) * 1000).toFixed(1)} mm inside the body`);
+      touched ||= distance < .18;
+    }
+    assert.ok(touched, "the body never reached the cloth");
+  } finally { sim.destroy(); }
+});
+
+test("body surface the cloth already covers at load is left to the authored layering", async () => {
+  const { BodySurface } = await import("../src/body-surface.js");
+  const root = new THREE.Group(), bone = new THREE.Bone(); bone.name = "Hips"; root.add(bone);
+  bodySphere(root, bone, .17);
+  // A cloth patch 1 mm in front of the sphere's +Z pole.
+  const cloth = [];
+  for (let x = -.03; x <= .03; x += .005) for (let y = -.03; y <= .03; y += .005) cloth.push(x, y, Math.sqrt(.171 ** 2 - x * x - y * y));
+  const body = BodySurface.create(root, new Set(), () => 0, cloth, new Set(["Hips"]));
+  // Hair or fingers near a capsule are not part of the limb it stands for.
+  assert.equal(BodySurface.create(root, new Set(), () => 0, cloth, new Set(["Head"])), null);
+  assert.ok(body.openCount > 100, "the uncovered body was dropped");
+  const P = body.position;
+  body.update([-1, -1, -1, 1, 1, 1]);
+  let covered = 0;
+  for (let p = 0; p < body.count; p++) {
+    if (body.covered[p]) { covered++; continue; }
+    assert.ok(Math.hypot(P[p * 3], P[p * 3 + 1]) > .02 || P[p * 3 + 2] < 0, `covered point ${p} still collides`);
+  }
+  assert.ok(covered > 0, "nothing was covered");
+  // A cloth point right there is left where it is.
+  const x = [0, 0, .16], before = x.slice();
+  assert.equal(body.collide(x, 0, .003, [0, 0, .16], 0, (reference, r) => r), false);
+  assert.deepEqual(x, before);
+});
+
+test("a lining keeps its depth along the simulated surface where the cloth turns away from the animation", async () => {
+  // Outer sheet with a lining 1 cm behind it; a large sphere tilts the lower
+  // sheet forward, away from its animated (vertical) pose.
+  const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.01);
+  const n = outer.getAttribute("position").count;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([...outer.getAttribute("position").array, ...lining.getAttribute("position").array], 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute([...outer.getAttribute("normal").array, ...outer.getAttribute("normal").array], 3));
+  geometry.setIndex([...outer.index.array, ...Array.from(outer.index.array, (i) => i + n)]);
+  const f = fixture({ extra: geometry, colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .7 }] });
+  f.collider.position.set(0, -1.1, -.9);
+  const sim = await f.create();
+  try {
+    run(f, sim, 90, (i) => f.collider.position.set(0, -1.1, -.9 + Math.min(1, i / 45) * 1.1));
+    const position = f.geometry.getAttribute("position");
+    let turned = 0;
+    for (let v = 0; v < n; v++) {
+      const x = position.getX(v), y = position.getY(v);
+      if (Math.abs(x) > .4 || y > -.2 || y < -.8) continue;
+      const a = world(f.mesh, v), b = world(f.mesh, v + n);
+      const side = world(f.mesh, vertexAt(f, x + .125, y)).sub(world(f.mesh, vertexAt(f, x - .125, y)));
+      const down = world(f.mesh, vertexAt(f, x, y - .125)).sub(world(f.mesh, vertexAt(f, x, y + .125)));
+      const normal = down.cross(side).normalize();
+      turned = Math.max(turned, Math.acos(Math.min(1, normal.z)));
+      const depth = a.clone().sub(b).dot(normal);
+      assert.ok(depth > .006, `lining at ${x.toFixed(2)},${y.toFixed(2)} is ${(depth * 1000).toFixed(1)} mm behind the fabric`);
+    }
+    assert.ok(turned > 1.2, `the cloth only turned ${turned.toFixed(2)} rad`);
+  } finally { sim.destroy(); }
+});

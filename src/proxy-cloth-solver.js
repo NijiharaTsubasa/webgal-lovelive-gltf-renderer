@@ -1,3 +1,6 @@
+import { rotateVector } from "./proxy-rotation.js";
+import { BODY_REACH } from "./body-surface.js";
+
 /**
  * Position-based solver for sparse proxy cloth particles, in world metres.
  *
@@ -21,9 +24,12 @@ const ITERATIONS = 2;
 const STRETCH = 1, COMPRESS = .5, BEND = .25;
 const CONTACT_SLACK = .02;
 const RESTORE = .25;
+// Limbs thinner than this (shins, feet, arms) can slip between two particles;
+// their contacts also test the edges in between.
+const EDGE_RADIUS = .065;
 
 export class ProxyClothSolver {
-  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null }) {
+  constructor({ count, edges, bends, fixed, colliderTypes, minimumGap = 0, contactMargin = 0, probes = null, rotations = null }) {
     // Probes: surface points embedded in up to four particles (CSR by the
     // particle that owns them). Their animated positions (`probeAnchor`) are
     // set per step by the owner; probes collide with the minimum gap.
@@ -33,10 +39,35 @@ export class ProxyClothSolver {
     this.probeAnchor = new Float64Array(this.probeStart[count] * 3);
     this.probePoint = new Float64Array(3);
     this.probeReference = new Float64Array(3);
+    // Optional ProxyRotations: probes then turn their offset with the cloth,
+    // exactly as the owner places the drawn vertices.
+    this.rotations = rotations;
+    // Set when the last step resolved its probes with `rotations`; the owner
+    // then draws with exactly those rotations instead of re-estimating them.
+    this.rotationsCurrent = false;
+    this.clearanceGap = (reference, r) => clearance(reference, r, this.minimumGap);
+    this.probeRotation = new Float64Array(4);
+    this.probeOffset = new Float64Array(3);
     // Extra broadphase reach for points that follow a particle from a distance.
     this.contactMargin = contactMargin;
     this.count = count;
     this.edges = edges; this.bends = bends;
+    // Edges by particle, so contacts can test the edges around a particle:
+    // a thin limb must not slip between two particles.
+    const degree = new Uint32Array(count + 1);
+    for (let e = 0; e < edges.length; e++) degree[edges[e] + 1]++;
+    for (let i = 0; i < count; i++) degree[i + 1] += degree[i];
+    const incident = new Uint32Array(edges.length), fill = degree.slice(0, count);
+    for (let e = 0; e < edges.length; e += 2) { incident[fill[edges[e]]++] = e; incident[fill[edges[e + 1]]++] = e; }
+    this.edgeStart = degree; this.incidentEdges = incident;
+    this.edgeStamp = new Float64Array(edges.length / 2);
+    this.edgeDistance = new Float64Array(count);
+    this.edgeHalf = 0;
+    // Longest incident edge per particle (with stretch), per step.
+    this.edgeReach = new Float64Array(count);
+    this.maxRadius = 0;
+    this.edgeDistanceMark = new Float64Array(count).fill(-1);
+    this.edgeMark = 0;
     this.edgeRest = new Float64Array(edges.length / 2);
     this.bendRest = new Float64Array(bends.length / 2);
     this.fixed = fixed;
@@ -52,6 +83,8 @@ export class ProxyClothSolver {
     // Per collider world AABB of its contact region, for a cheap reject.
     this.bounds = new Float64Array(this.types.length * 6);
     this.pairs = new Uint32Array(Math.max(2, count * this.types.length * 2));
+    this.edgePairs = new Uint32Array(Math.max(2, count * this.types.length * 2));
+    this.edgePairCount = 0;
 
     this.lastSubsteps = 0;
   }
@@ -110,9 +143,10 @@ export class ProxyClothSolver {
    * targets: animated proxy positions; normals: their animated surface normals.
    * radius: per-particle world contact radius.
    */
-  step({ targets, normals, colliders, radius, stiffness, damping, gravity, delta, backstop = -1, maxDistance = null }) {
+  step({ targets, normals, colliders, radius, stiffness, damping, gravity, delta, backstop = -1, maxDistance = null, body = null }) {
     if (!(delta > 0)) throw new Error("cloth 步长必须为正有限数");
     const n = this.substeps(colliders, radius, targets), h = delta / n;
+    this.rotationsCurrent = false;
     this.frameTargets = targets;
     this.lastSubsteps = n;
     const retention = Math.pow(1 - damping, 1 / n);
@@ -126,6 +160,7 @@ export class ProxyClothSolver {
     const pull = 1 - Math.exp(-stiffness * RESTORE * h);
     let maxRadius = 0;
     for (let i = 0; i < count; i++) if (radius[i] > maxRadius) maxRadius = radius[i];
+    this.maxRadius = maxRadius;
     for (let s = 1; s <= n; s++) {
       const a = s / n, step = 1 / n;
       for (let i = 0, o = 0; i < count; i++, o += 3) {
@@ -148,9 +183,23 @@ export class ProxyClothSolver {
       for (let k = 0; k < cl; k++) c[k] = c0[k] + (colliders[k] - c0[k]) * a;
       // Constraints move particles only a little within one substep; a
       // candidate list with some slack replaces per-iteration broadphase.
-      this.updateBounds(maxRadius + CONTACT_SLACK + this.contactMargin);
+      // A body surface reaches a little past its colliders (BODY_REACH).
+      this.updateBounds(maxRadius + CONTACT_SLACK + this.contactMargin + (body ? BODY_REACH : 0));
       const pairs = this.contactCandidates();
       restLengths(this.edges, t, this.edgeRest);
+      if (s === 1) {
+        let longest = 0;
+        for (let e = 0; e < this.edgeRest.length; e++) if (this.edgeRest[e] > longest) longest = this.edgeRest[e];
+        // Half the longest edge, with some stretch.
+        this.edgeHalf = longest * .6;
+        const reach = this.edgeReach;
+        reach.fill(0);
+        for (let e = 0; e < this.edges.length; e += 2) {
+          const l = this.edgeRest[e / 2] * 1.2, a = this.edges[e], b = this.edges[e + 1];
+          if (l > reach[a]) reach[a] = l;
+          if (l > reach[b]) reach[b] = l;
+        }
+      }
       restLengths(this.bends, t, this.bendRest);
       for (let iteration = 0; iteration < ITERATIONS; iteration++) {
         solveLinks(this.edges, this.edgeRest, x, fixed, STRETCH, COMPRESS);
@@ -164,11 +213,19 @@ export class ProxyClothSolver {
         // Probes only shape the drawn surface: resolving them once, at the end
         // of the step, keeps it clear without paying for them every substep.
         const probes = s === n && iteration === ITERATIONS - 1;
+        if (probes && pairs && this.rotations && normals) {
+          this.rotations.update(x, targets, normals, 2);
+          this.rotationsCurrent = true;
+        }
+        // The exact body surface (end-of-step pose) once per step, before the
+        // capsules, which keep the final word where a limb meets the body.
+        if (probes && pairs) this.indexPairs(pairs, radius, t, body);
         for (let p = 0; p < pairs; p += 2) {
           const i = this.pairs[p], k = this.pairs[p + 1];
           this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3);
-          if (probes) this.collideProbes(k, i);
         }
+        if (this.edgePairCount && iteration === ITERATIONS - 1) this.collideEdges(this.edgePairCount, radius, t);
+        if (probes && pairs) this.probePass(radius, t, body);
       }
       for (let i = 0, o = 0; i < count; i++, o += 3) {
         if (fixed[i]) continue;
@@ -181,40 +238,159 @@ export class ProxyClothSolver {
   }
 
   /**
-   * Probes owned by particle i against collider k. A probe sits where its
-   * render vertex will be drawn: anchor + sum_j w_j (x_j - T_j). Its push is
-   * shared by the moving particles it is embedded in (minimum-norm split),
-   * so the blended surface itself clears the collider.
+   * Collider candidates by particle (CSR) for the probe pass; particles with
+   * a candidate also meet the body surface here. It is only skinned around
+   * the colliders, so particles without a candidate are not near it.
    */
-  collideProbes(k, i) {
-    const start = this.probeStart[i], end = this.probeStart[i + 1];
-    if (start === end) return;
-    const x = this.positions, t = this.targets, T = this.frameTargets, fixed = this.fixed;
-    const anchor = this.probeAnchor, index = this.probeIndex, weight = this.probeWeight;
-    const point = this.probePoint, ref = this.probeReference, gap = this.minimumGap;
-    for (let p = start; p < end; p++) {
-      let px = anchor[p * 3], py = anchor[p * 3 + 1], pz = anchor[p * 3 + 2], rx = px, ry = py, rz = pz, norm = 0;
-      for (let j = p * 4; j < p * 4 + 4; j++) {
-        const c = index[j];
-        if (c < 0) break;
-        const w = weight[j], o = c * 3;
-        px += w * (x[o] - T[o]); py += w * (x[o + 1] - T[o + 1]); pz += w * (x[o + 2] - T[o + 2]);
-        rx += w * (t[o] - T[o]); ry += w * (t[o + 1] - T[o + 1]); rz += w * (t[o + 2] - T[o + 2]);
-        if (!fixed[c]) norm += w * w;
-      }
-      if (!norm) continue;
-      point[0] = px; point[1] = py; point[2] = pz; ref[0] = rx; ref[1] = ry; ref[2] = rz;
-      this.collideWith(k, point, 0, gap, ref, null, 0);
-      const dx = point[0] - px, dy = point[1] - py, dz = point[2] - pz;
-      if (!dx && !dy && !dz) continue;
-      for (let j = p * 4; j < p * 4 + 4; j++) {
-        const c = index[j];
-        if (c < 0) break;
-        if (fixed[c]) continue;
-        const s = weight[j] / norm, o = c * 3;
-        x[o] += dx * s; x[o + 1] += dy * s; x[o + 2] += dz * s;
+  indexPairs(pairs, radius, t, body) {
+    const count = this.count, list = this.pairs, x = this.positions;
+    const start = this.pairStart ??= new Uint32Array(count + 1), byParticle = this.pairColliders ??= new Uint32Array(list.length);
+    start.fill(0);
+    for (let p = 0; p < pairs; p += 2) start[list[p] + 1]++;
+    for (let i = 0; i < count; i++) start[i + 1] += start[i];
+    const fill = this.pairFill ??= new Uint32Array(count);
+    fill.set(start.subarray(0, count));
+    for (let p = 0; p < pairs; p += 2) byParticle[fill[list[p]]++] = list[p + 1];
+    if (!body) return;
+    for (let i = 0; i < count; i++) if (start[i + 1] > start[i]) body.collide(x, i * 3, radius[i], t, i * 3, this.clearanceGap);
+  }
+
+  /**
+   * Last word on the drawn surface, once per step, for particles near a
+   * collider. A probe sits where its render vertex will be drawn:
+   * sum_j w_j x_j + R (anchor - sum_j w_j T_j), R the blended rotation of those
+   * particles (identity without rotations); the targets equal T here (last
+   * substep). Each probe is placed once, resolved against the body surface
+   * and then its particle's colliders, and the resulting push is shared by
+   * the moving particles it is embedded in (minimum-norm split), so the
+   * blended surface itself clears them.
+   */
+  probePass(radius, t, body) {
+    const count = this.count, fixed = this.fixed, x = this.positions;
+    const start = this.pairStart, byParticle = this.pairColliders;
+    const T = this.frameTargets, rotations = this.rotations, gap = this.minimumGap;
+    const anchor = this.probeAnchor, index = this.probeIndex, weight = this.probeWeight, probeStart = this.probeStart;
+    const point = this.probePoint, ref = this.probeReference, q = this.probeRotation, d = this.probeOffset;
+    for (let i = 0; i < count; i++) {
+      const c0 = start[i], c1 = start[i + 1];
+      if (c0 === c1 || fixed[i]) continue;
+      for (let p = probeStart[i]; p < probeStart[i + 1]; p++) {
+        let px = 0, py = 0, pz = 0, tx = 0, ty = 0, tz = 0, norm = 0;
+        for (let j = p * 4; j < p * 4 + 4; j++) {
+          const c = index[j];
+          if (c < 0) break;
+          const w = weight[j], o = c * 3;
+          px += w * x[o]; py += w * x[o + 1]; pz += w * x[o + 2];
+          tx += w * T[o]; ty += w * T[o + 1]; tz += w * T[o + 2];
+          if (!fixed[c]) norm += w * w;
+        }
+        if (!norm) continue;
+        const rx = anchor[p * 3], ry = anchor[p * 3 + 1], rz = anchor[p * 3 + 2];
+        d[0] = rx - tx; d[1] = ry - ty; d[2] = rz - tz;
+        if (rotations) rotateVector(rotations.blend(index, weight, p * 4, q), d[0], d[1], d[2], d);
+        px += d[0]; py += d[1]; pz += d[2];
+        point[0] = px; point[1] = py; point[2] = pz; ref[0] = rx; ref[1] = ry; ref[2] = rz;
+        if (body) body.collide(point, 0, gap, ref, 0, this.clearanceGap);
+        for (let c = c0; c < c1; c++) this.collideWith(byParticle[c], point, 0, gap, ref, null, 0);
+        const dx = point[0] - px, dy = point[1] - py, dz = point[2] - pz;
+        if (!dx && !dy && !dz) continue;
+        for (let j = p * 4; j < p * 4 + 4; j++) {
+          const c = index[j];
+          if (c < 0) break;
+          if (fixed[c]) continue;
+          const s = weight[j] / norm, o = c * 3;
+          x[o] += dx * s; x[o + 1] += dy * s; x[o + 2] += dz * s;
+        }
       }
     }
+  }
+
+  /**
+   * Edges around each candidate particle against its thin round-cone
+   * colliders, once per edge and collider. Distance to a cone changes by at
+   * most 1 per unit along an edge, so an edge of length L whose ends are d_a
+   * and d_b from the surface stays at least (d_a + d_b - L) / 2 away: only
+   * edges with d_a + d_b < L + 2r get the exact test.
+   */
+  collideEdges(pairs, radius, t) {
+    const list = this.edgePairs, start = this.edgeStart, incident = this.incidentEdges, stamp = this.edgeStamp, types = this.types;
+    const c = this.colliders, x = this.positions, edges = this.edges, cache = this.edgeDistance, cached = this.edgeDistanceMark, reach = this.edgeReach;
+    let mark = this.edgeMark, last = -1;
+    for (let p = 0; p < pairs; p += 2) {
+      const i = list[p], k = list[p + 1], q = k * COLLIDER_STRIDE;
+      if (k !== last) { mark++; last = k; }
+      const di = coneDistance(x, i * 3, c, q, cache, cached, i, mark);
+      // No edge of i reaches the cone (d_j >= 0, L <= i's longest edge).
+      if (di >= reach[i] + 2 * this.maxRadius) continue;
+      for (let r = start[i]; r < start[i + 1]; r++) {
+        const e = incident[r];
+        if (stamp[e / 2] === mark) continue;
+        stamp[e / 2] = mark;
+        const j = edges[e] === i ? edges[e + 1] : edges[e];
+        const dj = coneDistance(x, j * 3, c, q, cache, cached, j, mark);
+        const ex = x[i * 3] - x[j * 3], ey = x[i * 3 + 1] - x[j * 3 + 1], ez = x[i * 3 + 2] - x[j * 3 + 2];
+        const reach = Math.sqrt(ex * ex + ey * ey + ez * ez) + 2 * Math.max(radius[i], radius[j]);
+        if (di + dj >= reach) continue;
+        this.collideEdge(k, e, radius, t);
+      }
+    }
+    this.edgeMark = mark;
+  }
+
+  /**
+   * Keep the interior of edge e (particles a, b) out of round cone k: the
+   * closest point of the edge to the cone axis is pushed out like a particle,
+   * the push split between a and b so that point moves by exactly it.
+   */
+  collideEdge(k, e, radius, t) {
+    const x = this.positions, c = this.colliders, fixed = this.fixed, q = k * COLLIDER_STRIDE;
+    const a = this.edges[e], b = this.edges[e + 1];
+    if (fixed[a] && fixed[b]) return;
+    const oa = a * 3, ob = b * 3;
+    const ax = c[q], ay = c[q + 1], az = c[q + 2], sx = c[q + 3] - ax, sy = c[q + 4] - ay, sz = c[q + 5] - az;
+    const r0 = c[q + 6], dr = c[q + 7] - r0, ss = sx * sx + sy * sy + sz * sz;
+    const dx = x[ob] - x[oa], dy = x[ob + 1] - x[oa + 1], dz = x[ob + 2] - x[oa + 2];
+    const wx = x[oa] - ax, wy = x[oa + 1] - ay, wz = x[oa + 2] - az;
+    const dd = dx * dx + dy * dy + dz * dz;
+    if (!(dd > 1e-14)) return;
+    // Closest points between the edge and the axis segment (Ericson 5.1.9).
+    const ds = dx * sx + dy * sy + dz * sz, dw = dx * wx + dy * wy + dz * wz, sw = sx * wx + sy * wy + sz * wz;
+    let f;
+    if (ss > 1e-14) {
+      const denom = dd * ss - ds * ds;
+      f = denom > 1e-14 ? Math.min(1, Math.max(0, (ds * sw - dw * ss) / denom)) : 0;
+      const u = (ds * f + sw) / ss;
+      if (u < 0) f = Math.min(1, Math.max(0, -dw / dd));
+      else if (u > 1) f = Math.min(1, Math.max(0, (ds - dw) / dd));
+    } else f = Math.min(1, Math.max(0, -dw / dd));
+    // Near an end the particle contact already covers it.
+    if (f < .05 || f > .95) return;
+    const g = 1 - f;
+    const px = x[oa] * g + x[ob] * f, py = x[oa + 1] * g + x[ob + 1] * f, pz = x[oa + 2] * g + x[ob + 2] * f;
+    const slope2 = ss > 0 ? dr * dr / ss : 0;
+    const shift = slope2 < .99 ? dr / Math.sqrt(1 - slope2) : 0;
+    const u = touchParameter(px, py, pz, ax, ay, az, sx, sy, sz, ss, shift);
+    const R = r0 + dr * u, qx = ax + sx * u, qy = ay + sy * u, qz = az + sz * u;
+    let nx = px - qx, ny = py - qy, nz = pz - qz;
+    const d2 = nx * nx + ny * ny + nz * nz, r = radius[a] * g + radius[b] * f;
+    let limit = R + r;
+    if (d2 >= limit * limit) return;
+    const tx = t[oa] * g + t[ob] * f, ty = t[oa + 1] * g + t[ob + 1] * f, tz = t[oa + 2] * g + t[ob + 2] * f;
+    const ut = touchParameter(tx, ty, tz, ax, ay, az, sx, sy, sz, ss, shift);
+    const rx = tx - ax - sx * ut, ry = ty - ay - sy * ut, rz = tz - az - sz * ut;
+    const reference = Math.sqrt(rx * rx + ry * ry + rz * rz) - dr * ut + dr * u;
+    if (reference < limit) limit = R + clearance(reference - R, r, this.minimumGap);
+    if (d2 >= limit * limit) return;
+    let d = Math.sqrt(d2);
+    if (d < 1e-9) { nx = rx; ny = ry; nz = rz; d = Math.sqrt(rx * rx + ry * ry + rz * rz); }
+    if (d < 1e-9) return;
+    // Move the edge point to the cone surface (plus clearance) on that side.
+    const scale = limit / d;
+    const mx = qx + nx * scale - px, my = qy + ny * scale - py, mz = qz + nz * scale - pz;
+    const wa = fixed[a] ? 0 : g, wb = fixed[b] ? 0 : f, norm = wa * wa + wb * wb;
+    const ka = wa / norm, kb = wb / norm;
+    x[oa] += mx * ka; x[oa + 1] += my * ka; x[oa + 2] += mz * ka;
+    x[ob] += mx * kb; x[ob + 1] += my * kb; x[ob + 2] += mz * kb;
   }
 
   updateBounds(margin) {
@@ -237,16 +413,28 @@ export class ProxyClothSolver {
     }
   }
 
+  /**
+   * Particle/collider pairs inside each collider's bounds (`pairs`, returns
+   * their length) and, for thin limbs, the particles within half an edge
+   * more whose edges may thread them (`edgePairs`, length in edgePairCount).
+   */
   contactCandidates() {
-    const x = this.positions, b = this.bounds, fixed = this.fixed, pairs = this.pairs;
-    let n = 0;
+    const x = this.positions, b = this.bounds, fixed = this.fixed, pairs = this.pairs, edgePairs = this.edgePairs, c = this.colliders;
+    let n = 0, m = 0;
     for (let k = 0; k < this.types.length; k++) {
       const bo = k * 6, x0 = b[bo], y0 = b[bo + 1], z0 = b[bo + 2], x1 = b[bo + 3], y1 = b[bo + 4], z1 = b[bo + 5];
+      const type = this.types[k], q = k * COLLIDER_STRIDE;
+      const pad = (type === COLLIDER.sphere || type === COLLIDER.capsule) && Math.max(c[q + 6], c[q + 7]) < EDGE_RADIUS ? this.edgeHalf : -1;
       for (let i = 0, o = 0; i < this.count; i++, o += 3) {
-        if (fixed[i] || x[o] < x0 || x[o + 1] < y0 || x[o + 2] < z0 || x[o] > x1 || x[o + 1] > y1 || x[o + 2] > z1) continue;
-        pairs[n++] = i; pairs[n++] = k;
+        if (fixed[i]) continue;
+        const px = x[o], py = x[o + 1], pz = x[o + 2];
+        if (px >= x0 && py >= y0 && pz >= z0 && px <= x1 && py <= y1 && pz <= z1) { pairs[n++] = i; pairs[n++] = k; }
+        if (pad >= 0 && px >= x0 - pad && py >= y0 - pad && pz >= z0 - pad && px <= x1 + pad && py <= y1 + pad && pz <= z1 + pad) {
+          edgePairs[m++] = i; edgePairs[m++] = k;
+        }
       }
     }
+    this.edgePairCount = m;
     return n;
   }
 
@@ -389,6 +577,21 @@ function limitDistance(x, t, fixed, limit) {
     const k = l / Math.sqrt(d2);
     x[o] = t[o] + dx * k; x[o + 1] = t[o + 1] + dy * k; x[o + 2] = t[o + 2] + dz * k;
   }
+}
+
+/** Distance from particle point x[o..] to the surface of cone q (axis projection), cached per mark. */
+function coneDistance(x, o, c, q, cache, cached, i, mark) {
+  if (cached[i] === mark) return cache[i];
+  const ax = c[q], ay = c[q + 1], az = c[q + 2], sx = c[q + 3] - ax, sy = c[q + 4] - ay, sz = c[q + 5] - az;
+  const ss = sx * sx + sy * sy + sz * sz;
+  let u = ss > 0 ? ((x[o] - ax) * sx + (x[o + 1] - ay) * sy + (x[o + 2] - az) * sz) / ss : 0;
+  u = u < 0 ? 0 : u > 1 ? 1 : u;
+  const ex = x[o] - ax - sx * u, ey = x[o + 1] - ay - sy * u, ez = x[o + 2] - az - sz * u;
+  // The axis-projection radius over-estimates the round cone's distance by
+  // little for these gentle tapers; the margin below absorbs it.
+  const d = Math.sqrt(ex * ex + ey * ey + ez * ez) - Math.max(c[q + 6], c[q + 7]);
+  cached[i] = mark; cache[i] = d;
+  return d;
 }
 
 function restLengths(links, t, out) {
