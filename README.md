@@ -13,6 +13,8 @@ import { CharacterRenderer } from 'webgal-lovelive-gltf-renderer/character-rende
 
 创建选项 `meshClothEnabled` 控制网格布料，默认 `true`。设为 `false` 时保留骨骼弹簧物理；需要网格布料的实例在创建时启用该选项。
 
+网格布料只模拟一组稀疏的代理粒子，渲染顶点按权重跟随代理变形，静止时与原蒙皮完全一致。模型声明了来源代理划分（`physics.cloths[].proxy`）时按其分组，否则按空间距离自动划分；空间上重叠或相邻的分片、内衬会合并到同一组粒子上一起运动。
+
 模型纹理支持 PNG 和 `KHR_texture_basisu` 的 KTX2/UASTC。加载时根据 WebGL 能力转码为 GPU 支持的压缩格式，无可用格式时使用 RGBA。转码器 JS 和 WASM 随本包提供，Vite 构建会将其发布为资源文件。使用默认加载器的角色共享转码 Worker，最后一个使用者释放后回收；自行注入 GLTFLoader 的宿主需自行配置 KTX2Loader。
 
 所有资源文件格式由`docs`中的文档定义。文档为 AI 所写，可能较为难以理解，由于作者本人对该领域不熟悉，仅能做到大方向把控，无余力润色文档，还请见谅。

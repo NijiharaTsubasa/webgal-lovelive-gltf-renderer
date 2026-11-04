@@ -58,6 +58,8 @@ export function validatePhysics(value, source = "physics") {
         || !scalar(c.radius) || !scalar(c.stiffness) || !scalar(c.damping, 0, 1)
         || !xyz(c.gravity) || !Array.isArray(c.colliders)
         || !c.colliders.every((i) => index(i) && i < value.colliders.length)) fail("布面、固定点或碰撞引用无效");
+      if (c.proxy !== undefined && (!object(c.proxy) || !Array.isArray(c.proxy.vertices)
+        || !c.proxy.vertices.every(index))) fail("布面代理顶点无效");
       const key = `${c.node}/${c.primitive}`;
       if (meshes.has(key)) fail(`重复布面 ${key}`);
       meshes.add(key);
@@ -294,8 +296,7 @@ export class ModelPhysics {
       animate(delta + this.frameAccumulator);
       // A long frame must not trigger the expensive initial thirty-step
       // settling loop again, otherwise overload perpetuates itself forever.
-      // Jolt refreshes transported cloth bounds after the first native step;
-      // the second resolves contacts at the new pose after a large jump.
+      // Two cloth steps resolve contacts at the new pose after a large jump.
       this.reset(2);
       this.update(0);
       afterPhysics();
