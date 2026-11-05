@@ -226,6 +226,22 @@ test("the fabric between sparse proxy particles clears a limb, not just the part
   } finally { sim.destroy(); }
 });
 
+test("a limb pressing into the middle of a large proxy patch clears every vertex of it, not just its rim", async () => {
+  // Source proxies of 1 m x 1 m blocks (81 vertices each); a sphere presses
+  // into the middle of the lower-left block from behind, far from its rim.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .12 }] });
+  const position = f.geometry.getAttribute("position");
+  const block = (i) => (position.getX(i) < 0 ? 0 : 1) + (position.getY(i) < 0 ? 2 : 0);
+  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
+  f.collider.position.set(-.5, -.5, -.3);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60, (i) => f.collider.position.set(-.5, -.5, -.3 + Math.min(1, i / 30) * .35));
+    const centre = f.collider.getWorldPosition(new THREE.Vector3());
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).distanceTo(centre) > .12 + .002, `vertex ${i} sags into the sphere`);
+  } finally { sim.destroy(); }
+});
+
 test("a lining pushed by a limb stays behind the fabric in front of it", async () => {
   // Outer sheet with a lining 5 mm behind it, both in one cloth primitive.
   const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.005);

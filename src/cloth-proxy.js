@@ -96,13 +96,13 @@ export function buildClothProxy(geometry, fixed, proxy, { spacing } = {}) {
   }));
 }
 
-const PROBES = 8;
-
 /**
- * Collision probes: the outermost member vertices of each moving proxy. A
- * sparse particle alone lets the fabric between particles (and the layers
- * behind it) sag into a limb; probes carried with the particle let the solver
- * push the whole patch clear, moving its layers together.
+ * Collision probes: every member vertex of each moving proxy (one per
+ * position, seam copies share it). A sparse particle alone lets the fabric
+ * between particles (and the layers behind it) sag into a limb; probes
+ * carried with the particle let the solver push the whole patch clear,
+ * moving its layers together. Only the outermost members are not enough: in
+ * a deep bend the thigh root rises into the waist of a skirt between them.
  */
 function withProbes(position, proxy) {
   const { count, members, memberStart, rest, fixed } = proxy;
@@ -117,8 +117,10 @@ function withProbes(position, proxy) {
         seen.add(key);
         candidates.push([(x - rest[c * 3]) ** 2 + (y - rest[c * 3 + 1]) ** 2 + (z - rest[c * 3 + 2]) ** 2, v]);
       }
+      // Outermost first: they carry the patch's shape, the inner ones then
+      // only settle what still sags between them.
       candidates.sort((a, b) => b[0] - a[0]);
-      for (const [, v] of candidates.slice(0, PROBES)) vertex.push(v);
+      for (const [, v] of candidates) vertex.push(v);
     }
     start[c + 1] = vertex.length;
   }
