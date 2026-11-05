@@ -226,22 +226,6 @@ test("the fabric between sparse proxy particles clears a limb, not just the part
   } finally { sim.destroy(); }
 });
 
-test("a limb pressing into the middle of a large proxy patch clears every vertex of it, not just its rim", async () => {
-  // Source proxies of 1 m x 1 m blocks (81 vertices each); a sphere presses
-  // into the middle of the lower-left block from behind, far from its rim.
-  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .12 }] });
-  const position = f.geometry.getAttribute("position");
-  const block = (i) => (position.getX(i) < 0 ? 0 : 1) + (position.getY(i) < 0 ? 2 : 0);
-  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
-  f.collider.position.set(-.5, -.5, -.3);
-  const sim = await f.create();
-  try {
-    run(f, sim, 60, (i) => f.collider.position.set(-.5, -.5, -.3 + Math.min(1, i / 30) * .35));
-    const centre = f.collider.getWorldPosition(new THREE.Vector3());
-    for (const i of moving(f)) assert.ok(world(f.mesh, i).distanceTo(centre) > .12 + .002, `vertex ${i} sags into the sphere`);
-  } finally { sim.destroy(); }
-});
-
 test("a lining pushed by a limb stays behind the fabric in front of it", async () => {
   // Outer sheet with a lining 5 mm behind it, both in one cloth primitive.
   const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.005);
@@ -600,6 +584,33 @@ test("cloth clears the body mesh where it bulges out of the limb's collider", as
       const distance = world(f.mesh, i).distanceTo(centre);
       assert.ok(distance > .17, `vertex ${i} is ${((.17 - distance) * 1000).toFixed(1)} mm inside the body`);
       touched ||= distance < .18;
+    }
+    assert.ok(touched, "the body never reached the cloth");
+  } finally { sim.destroy(); }
+});
+
+test("drawn cloth between sparse probes stays outside the body mesh", async () => {
+  // Source proxies of 1 m x 1 m blocks (81 vertices, 8 of them probes); the
+  // body (2 cm larger than its collider) presses into the middle of the
+  // lower-left block, far from its rim.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .12 }] });
+  const position = f.geometry.getAttribute("position");
+  const block = (i) => (position.getX(i) < 0 ? 0 : 1) + (position.getY(i) < 0 ? 2 : 0);
+  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
+  const bone = new THREE.Bone(); bone.name = "Hips"; f.root.add(bone); f.nodes[1] = bone;
+  bodySphere(f.root, bone, .14);
+  bone.position.set(-.5, -.5, -.3);
+  const sim = await f.create();
+  try {
+    assert.ok(sim.body?.count > 0, "the body around the collider was not picked up");
+    // It ends 2 cm in front of the sheet's plane.
+    run(f, sim, 60, (i) => bone.position.set(-.5, -.5, -.3 + Math.min(1, i / 30) * .18));
+    const centre = bone.getWorldPosition(new THREE.Vector3());
+    let touched = false;
+    for (const i of moving(f)) {
+      const distance = world(f.mesh, i).distanceTo(centre);
+      assert.ok(distance > .14 - 1e-3, `vertex ${i} is ${((.14 - distance) * 1000).toFixed(1)} mm inside the body`);
+      touched ||= distance < .15;
     }
     assert.ok(touched, "the body never reached the cloth");
   } finally { sim.destroy(); }

@@ -13,6 +13,8 @@ const AFFINE = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14];
 // A particle may leave its animated position by at most this fraction of its
 // rest distance (along the cloth) from the nearest fixed particle.
 const MAX_DISTANCE = .5;
+// How far in front of the body surface drawn cloth is kept (mesh units).
+const HUG_GAP = .006;
 // Bounds pad for skinning the body surface: how far cloth can get in a frame.
 const BODY_BOUNDS_PAD = .15;
 
@@ -38,6 +40,7 @@ class Cloth {
     this.physics = physics; this.resolve = resolve;
     // Shared BodySurface of the character, set by createMeshCloth.
     this.body = null;
+    this.worldScale = 1;
     this.mesh = resolvePrimitive ? resolvePrimitive(definition.node, definition.primitive)
       : primitiveMesh(resolve(definition.node), definition.primitive);
     if (!this.mesh?.isSkinnedMesh) throw new Error("cloth primitive 不是 SkinnedMesh");
@@ -295,6 +298,7 @@ class Cloth {
     }
     proxyNormals(this.proxy.triangles, T, this.targetNormals, this.proxy.orientation);
     const scale = maximumStretch(mesh.matrixWorld);
+    this.worldScale = scale;
     // Contact radius: the cloth gap plus how far member vertices sit behind
     // their proxy, so the merged surface keeps all of them off the body.
     const thickness = this.proxy.thickness;
@@ -391,13 +395,16 @@ class Cloth {
     const activeNodes = this.activeNodes, SP = this.proxySkinned, VS = this.vertexSkin;
     // 1. Simulated world position per welded vertex: the proxy-skinned pose
     // plus the interpolated simulation displacement sum_i w_i (P_i - T_i).
-    // Collision clearance is already resolved for this blended surface by the
-    // solver's probes; nothing is pushed vertex by vertex here, which would
-    // move a lining past the fabric in front of it.
+    // Capsule clearance is resolved for this blended surface by the solver's
+    // probes; only the exact body surface is applied per vertex (HUG_GAP: a
+    // lining pushed out stays behind fabric that is further out than that).
     // The vertex's offset from its interpolated proxy surface (pleat depth,
     // lining gap) turns with the blended rotation of those proxies, so stacked
     // layers stay stacked when the cloth swings away from the animation.
     const rotations = this.rotations, q = this.blendScratch, d = this.normalScratch;
+    // Every drawn vertex then keeps clear of the exact body surface
+    // (BodySurface.hug): the blended surface between probes can sink in.
+    const body = this.body, hugGap = HUG_GAP * this.worldScale;
     if (!this.solver.rotationsCurrent) rotations.update(P, T, 2);
     this.solver.rotationsCurrent = false;
     for (let a = 0; a < activeNodes.length; a++) {
@@ -415,6 +422,7 @@ class Cloth {
       const fx = px + d[0], fy = py + d[1], fz = pz + d[2];
       if (!Number.isFinite(fx + fy + fz)) throw new Error("cloth 求解产生非有限坐标");
       F[f] = fx; F[f + 1] = fy; F[f + 2] = fz;
+      if (body) body.hug(F, f, S, o, hugGap);
     }
     // 2. Geometric normals of the animated and simulated surfaces; the
     // authored normal turns by the same amount, keeping its smoothing.

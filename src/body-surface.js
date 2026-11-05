@@ -82,18 +82,22 @@ export class BodySurface {
       if (!grid.has(key)) grid.set(key, []);
       grid.get(key).push(i);
     }
-    const P = surface.position, N = surface.normal, covered = surface.covered;
+    const P = surface.position, N = surface.normal, covered = surface.covered, coverDepth = surface.coverDepth;
     let open = 0;
     for (let p = 0; p < surface.count; p++) {
       const px = P[p * 3], py = P[p * 3 + 1], pz = P[p * 3 + 2], cx = cell(px), cy = cell(py), cz = cell(pz);
-      for (let dx = -1; dx <= 1 && !covered[p]; dx++) for (let dy = -1; dy <= 1 && !covered[p]; dy++) for (let dz = -1; dz <= 1 && !covered[p]; dz++) {
+      // Covered: cloth sits within COVER_GAP of it; coverDepth: how far in
+      // front of it (negative: behind it) the deepest such cloth sits.
+      let deepest = COVER_GAP;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
         for (const i of grid.get(`${cx + dx},${cy + dy},${cz + dz}`) ?? []) {
           const ex = cloth[i] - px, ey = cloth[i + 1] - py, ez = cloth[i + 2] - pz;
           if (ex * ex + ey * ey + ez * ez > COVER_RADIUS * COVER_RADIUS) continue;
-          if (ex * N[p * 3] + ey * N[p * 3 + 1] + ez * N[p * 3 + 2] < COVER_GAP) { covered[p] = 1; break; }
+          const side = ex * N[p * 3] + ey * N[p * 3 + 1] + ez * N[p * 3 + 2];
+          if (side < deepest) deepest = side;
         }
       }
-      if (!covered[p]) open++;
+      if (deepest < COVER_GAP) { covered[p] = 1; coverDepth[p] = Math.min(0, deepest); } else open++;
     }
     surface.openCount = open;
     return open ? surface : null;
@@ -147,6 +151,7 @@ export class BodySurface {
     this.matrices = new Float64Array(palette.length * 16);
     this.count = n;
     this.covered = new Uint8Array(n);
+    this.coverDepth = new Float64Array(n);
     this.openCount = n;
     this.position = new Float64Array(n * 3);
     this.normal = new Float64Array(n * 3);
@@ -265,5 +270,47 @@ export class BodySurface {
     const push = limit - s;
     x[o] = px + nx * push; x[o + 1] = py + ny * push; x[o + 2] = pz + nz * push;
     return true;
+  }
+
+  /**
+   * Last word on a drawn vertex x[o..] (the simulated surface, not a
+   * particle): keep it on the outside of the nearest surface point, `gap` in
+   * front of it, or as far as its animated position ref[ro..] is if that is
+   * closer (authored contact). Covered points (authored overlap at load) only
+   * keep it no deeper than the covering cloth was then. Probes resolve the
+   * particles against the body once per step; the blended surface between
+   * and behind them can still sink into it, most where a thigh root rises
+   * into the waist of a skirt.
+   */
+  hug(x, o, ref, ro, gap) {
+    if (!this.activeCount) return;
+    const P = this.position, N = this.normal, table = this.table, cells = this.cellPoints, grid = this.grid, dims = this.dims;
+    const px = x[o], py = x[o + 1], pz = x[o + 2], gx = dims[0], gy = dims[1], gz = dims[2];
+    const cx = Math.floor((px - grid[0]) / CELL), cy = Math.floor((py - grid[1]) / CELL), cz = Math.floor((pz - grid[2]) / CELL);
+    if (cx < -1 || cy < -1 || cz < -1 || cx > gx || cy > gy || cz > gz) return;
+    const ax = cx > 0 ? cx - 1 : 0, bx = cx < gx - 1 ? cx + 1 : gx - 1;
+    const ay = cy > 0 ? cy - 1 : 0, by = cy < gy - 1 ? cy + 1 : gy - 1;
+    const az = cz > 0 ? cz - 1 : 0, bz = cz < gz - 1 ? cz + 1 : gz - 1;
+    let best = -1, bestDistance = CELL * CELL;
+    for (let ix = ax; ix <= bx; ix++) for (let iy = ay; iy <= by; iy++) {
+      const row = (ix * gy + iy) * gz;
+      for (let c = table[row + az], end = table[row + bz + 1]; c < end; c++) {
+        const p = cells[c] * 3, ex = px - P[p], ey = py - P[p + 1], ez = pz - P[p + 2];
+        const d = ex * ex + ey * ey + ez * ez;
+        if (d < bestDistance) { bestDistance = d; best = p; }
+      }
+    }
+    if (best < 0) return;
+    const nx = N[best], ny = N[best + 1], nz = N[best + 2];
+    const s = (px - P[best]) * nx + (py - P[best + 1]) * ny + (pz - P[best + 2]) * nz;
+    let limit;
+    if (this.covered[best / 3]) limit = this.coverDepth[best / 3];
+    else {
+      const sr = (ref[ro] - P[best]) * nx + (ref[ro + 1] - P[best + 1]) * ny + (ref[ro + 2] - P[best + 2]) * nz;
+      limit = sr >= 0 && sr < gap ? sr : gap;
+    }
+    if (s >= limit) return;
+    const push = limit - s;
+    x[o] = px + nx * push; x[o + 1] = py + ny * push; x[o + 2] = pz + nz * push;
   }
 }

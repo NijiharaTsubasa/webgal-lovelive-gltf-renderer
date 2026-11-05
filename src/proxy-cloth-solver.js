@@ -24,11 +24,6 @@ const ITERATIONS = 2;
 const STRETCH = 1, COMPRESS = .5, BEND = .25;
 const CONTACT_SLACK = .02;
 const RESTORE = .25;
-// A probe's push moves each of its particles by at most this many times the
-// push. A probe carried mostly by fixed particles (at a waistband) would
-// otherwise fling its few moving particles; the rest of such a probe follows
-// its fixed particles' skinning anyway.
-const PROBE_GAIN = 2;
 // Limbs thinner than this (shins, feet, arms) can slip between two particles;
 // their contacts also test the edges in between.
 const EDGE_RADIUS = .065;
@@ -348,9 +343,8 @@ export class ProxyClothSolver {
    * particles (identity without rotations); the targets equal T here (last
    * substep). Each probe is placed once, resolved against the body surface
    * and then its particle's colliders, and the resulting push is shared by
-   * the moving particles it is embedded in (minimum-norm split, at most
-   * PROBE_GAIN times the push each), so the blended surface itself clears
-   * them.
+   * the moving particles it is embedded in (minimum-norm split), so the
+   * blended surface itself clears them.
    */
   probePass(radius, t, body) {
     const count = this.count, fixed = this.fixed, x = this.positions;
@@ -386,7 +380,7 @@ export class ProxyClothSolver {
           const c = index[j];
           if (c < 0) break;
           if (fixed[c]) continue;
-          const s = Math.min(weight[j] / norm, PROBE_GAIN), o = c * 3;
+          const s = weight[j] / norm, o = c * 3;
           x[o] += dx * s; x[o + 1] += dy * s; x[o + 2] += dz * s;
         }
       }
