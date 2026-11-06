@@ -129,7 +129,6 @@ export class ProxyClothSolver {
     this.velocity.fill(0);
     this.lastColliders.set(colliders);
     this.colliders.set(colliders);
-    this.markAuthoredEdges(targets, colliders);
     this.entryStamp.fill(0);
     this.axisLast.fill(0);
   }
@@ -303,7 +302,7 @@ export class ProxyClothSolver {
         if (probes && pairs) this.indexPairs(pairs, radius, t, body);
         for (let p = 0; p < pairs; p += 2) {
           const i = this.pairs[p], k = this.pairs[p + 1];
-          this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3, this.entry(i, k), this.pinched(i));
+          this.collideWith(k, x, i * 3, radius[i], t, prev, i * 3, this.entry(i, k), this.pinched(i, k));
         }
         if (this.edgePairCount && iteration === ITERATIONS - 1) this.collideEdges(this.edgePairCount, radius, t);
         if (probes && pairs) this.probePass(radius, t, body);
@@ -372,8 +371,10 @@ export class ProxyClothSolver {
         px += d[0]; py += d[1]; pz += d[2];
         point[0] = px; point[1] = py; point[2] = pz; ref[0] = rx; ref[1] = ry; ref[2] = rz;
         if (body) body.collide(point, 0, gap, ref, 0, this.clearanceGap);
-        const pinch = this.pinched(i);
-        for (let c = c0; c < c1; c++) this.collideWith(byParticle[c], point, 0, gap, ref, null, 0, this.entry(i, byParticle[c]), pinch);
+        for (let c = c0; c < c1; c++) {
+          const k = byParticle[c];
+          this.collideWith(k, point, 0, gap, ref, null, 0, this.entry(i, k), this.pinched(i, k));
+        }
         const dx = point[0] - px, dy = point[1] - py, dz = point[2] - pz;
         if (!dx && !dy && !dz) continue;
         for (let j = p * 4; j < p * 4 + 4; j++) {
@@ -591,10 +592,13 @@ export class ProxyClothSolver {
     }
   }
 
-  /** Whether particle i's reference lies in the colliders of two body segments, one a folded leg. */
-  pinched(i) {
-    const m = this.pinchMask[i];
-    return (m & (m - 1)) !== 0 && (m & this.closedSegments & LEG_SEGMENTS) !== 0;
+  /** Whether this contact belongs to the folded hip crease pinching the reference. */
+  pinched(i, k) {
+    const mask = this.pinchMask[i];
+    const foldedLegs = mask & this.closedSegments & LEG_SEGMENTS;
+    const segment = this.colliderLimbs[k];
+    return (mask & 1) !== 0 && foldedLegs !== 0
+      && (segment === 0 || (segment >= 0 && (foldedLegs & (1 << segment)) !== 0));
   }
 
   /** Entry record of particle i in cone k for this substep, or -1. */
@@ -641,7 +645,14 @@ export class ProxyClothSolver {
           const side = this.entrySide, f = entry * 3, ex = side[f], ey = side[f + 1], ez = side[f + 2];
           const rd = Math.sqrt(rx * rx + ry * ry + rz * rz);
           if (pinch && rd > 1e-9) { dx = rx; dy = ry; dz = rz; d = rd; }
-          else if (this.closedSegments && !(dx * ex + dy * ey + dz * ez > 0)) { dx = ex; dy = ey; dz = ez; d = Math.sqrt(ex * ex + ey * ey + ez * ez); }
+          else {
+            const segment = this.colliderLimbs[k];
+            const creaseContact = segment === 0 ? this.closedSegments !== 0
+              : segment > 0 && (this.closedSegments & (1 << segment)) !== 0;
+            if (creaseContact && dx * ex + dy * ey + dz * ez <= 0) {
+              dx = ex; dy = ey; dz = ez; d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+            }
+          }
         }
         if (d < 1e-9) {
           // Exactly on the axis: leave towards the side it came from.

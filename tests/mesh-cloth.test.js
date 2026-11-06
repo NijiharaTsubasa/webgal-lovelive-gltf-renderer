@@ -506,6 +506,20 @@ test("cloth authored across a thin limb stays as authored at rest", async () => 
   } finally { sim.destroy(); }
 });
 
+test("resetting cloth in an animated pose does not exempt newly intersecting edges", async () => {
+  const f = fixture({ segments: 4, colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .05 }] });
+  f.cloth.proxy = { vertices: Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i) };
+  f.collider.position.set(0, -.25, -.1);
+  const sim = await f.create();
+  try {
+    sim.reset(30);
+    run(f, sim, 1, () => { f.collider.position.z = -.03; });
+    const a = world(f.mesh, vertexAt(f, 0, 0));
+    const b = world(f.mesh, vertexAt(f, 0, -.5));
+    assert.ok((a.z + b.z) / 2 > .01, "the edge still intersects the collider after reset");
+  } finally { sim.destroy(); }
+});
+
 test("a seam fixed on only one of its vertex copies stays put on every copy", async () => {
   // Non-indexed: every position has a copy per triangle, as at UV seams. The
   // configuration lists only the first copy of each top-row position.
@@ -699,4 +713,22 @@ test("cloth pinched in a closed crease stays in it instead of coming out behind 
   solver.positions.set([0, 0, -.01], 3);
   step(0);
   assert.ok(solver.positions[5] < -.05, "cloth was pulled through an open limb");
+});
+
+test("folding a leg does not change which side of the forearm cloth exits", () => {
+  const solver = new ProxyClothSolver({ count: 2, edges: new Uint32Array([0, 1]), bends: new Uint32Array(0),
+    fixed: new Uint8Array([1, 0]), colliderTypes: [COLLIDER.capsule], colliderLimbs: new Int8Array([4]) });
+  const colliders = new Float64Array(COLLIDER_STRIDE);
+  colliders.set([-.2, 0, 0, .2, 0, 0, .05, .05]);
+  const targets = new Float64Array([0, .3, .04, 0, 0, .03]);
+  const step = (closedSegments) => {
+    solver.reset(targets, colliders);
+    solver.positions.set([0, 0, -.01], 3);
+    solver.step({ targets, normals: null, colliders, radius: new Float64Array([.01, .01]),
+      stiffness: 1, damping: .5, gravity: [0, 0, 0], delta: STEP, closedSegments });
+    return solver.positions[5];
+  };
+  const open = step(0);
+  assert.ok(open < -.05, "the contact did not push the cloth out on its original side");
+  assert.equal(step(1 << 1), open);
 });
