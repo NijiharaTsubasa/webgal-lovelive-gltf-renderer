@@ -205,6 +205,29 @@ test('auxiliary pass material shares Shader runtime and resolves metadata withou
   await assert.rejects(scope.createPassMaterial(source, 'Depth', mesh), /disposed/);
 });
 
+test('simulated cloth draws back faces with its culled main pass but keeps other passes', async () => {
+  const registry = new ShaderRegistry();
+  registry.registerPackage({ components: [{ type: 'shader', name: 'fixture', src: 'shader', script: 'runtime', samplers: [],
+    passes: [{ id: 'Forward', sections: {}, renderState: { cull: 2 } }, { id: 'Outline', sections: {}, renderState: { cull: 1 } }] }] },
+  { source: 'https://example.test/config.json', loadText: async () => '', loadModule: async () => ({ default: class {} }) });
+  const make = (simulatedCloth) => {
+    const source = new THREE.MeshStandardMaterial();
+    source.userData = { shader: 'fixture', textures: {}, shaderParams: {}, passes: [{ id: 'Forward' }, { id: 'Outline' }] };
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(), source);
+    if (simulatedCloth) mesh.userData.simulatedCloth = true;
+    return mesh;
+  };
+  const root = new THREE.Group(), cloth = make(true), plain = make(false); root.add(cloth, plain);
+  const scope = createShaderRuntimeScope({ state: { setMaterial() {} }, getContext: () => ({ colorMask() {} }) }, registry);
+  await scope.applyCustomShaders({ parser: {} }, root);
+  assert.equal(cloth.material.side, THREE.DoubleSide);
+  assert.equal(plain.material.side, THREE.FrontSide);
+  const outline = root.children.find(child => child !== cloth && child !== plain && child.material.userData.materialPass.id === 'Outline'
+    && child.parent === root && child.geometry === cloth.geometry);
+  assert.equal(outline.material.side, THREE.BackSide);
+  scope.dispose();
+});
+
 test('loading owns profile attachment and clear releases only its own scope', async () => {
   let profileParts;
   const calls = [], packages = new ResourcePackages({ loadModule: async () => ({ createRenderProfile({ parts }) {

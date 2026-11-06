@@ -132,9 +132,11 @@ test("cloth declarations validate mesh identity, pins and collision references",
   const cloth = { node: 2, primitive: 0, fixed: [0, 1], radius: .003,
     stiffness: 12, damping: .8, gravity: [0, 0, 0], colliders: [0] };
   validatePhysics({ ...physics, springs: [], cloths: [cloth] });
+  validatePhysics({ ...physics, springs: [], cloths: [{ ...cloth, proxy: { vertices: [0, 0, 1] } }] });
   for (const invalid of [{ node: -1 }, { primitive: .5 }, { fixed: [0, 0] },
     { fixed: [-1] }, { fixed: [] }, { radius: NaN }, { stiffness: -1 }, { damping: 1.1 },
-    { gravity: [0, Infinity, 0] }, { colliders: [1] }]) {
+    { gravity: [0, Infinity, 0] }, { colliders: [1] }, { proxy: [] }, { proxy: { vertices: [0, -1] } },
+    { proxy: { vertices: [.5] } }, { proxy: {} }]) {
     assert.throws(() => validatePhysics({ ...physics, cloths: [{ ...cloth, ...invalid }] }));
   }
   assert.throws(() => validatePhysics({ ...physics, cloths: [cloth, cloth] }));

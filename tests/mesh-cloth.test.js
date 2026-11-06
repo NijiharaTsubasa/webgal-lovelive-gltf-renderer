@@ -2,134 +2,64 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
 import { clothTopology, vertexSkinMatrix, createMeshCloth } from "../src/mesh-cloth.js";
-import { morphTerms } from "../src/cloth-geometry.js";
-import { createJoltClothSolver } from "../src/jolt-cloth-solver.js";
+import { buildClothProxy } from "../src/cloth-proxy.js";
+import { ProxyClothSolver, COLLIDER, COLLIDER_STRIDE } from "../src/proxy-cloth-solver.js";
 
-test("backstops do not add impulses when transported animation moves behind the previous reference", async () => {
-  const initial = [[0, 0, 0], [.1, 0, 0], [0, .1, 0]].map((v) => new THREE.Vector3(...v));
-  const sim = await createJoltClothSolver({ positions: initial, indices: [0, 1, 2], fixed: new Set([0]),
-    radius: .003, damping: .8, colliders: [] });
-  try {
-    const moved = initial.map((p) => p.clone().add(new THREE.Vector3(0, 0, -.1)));
-    sim.step({ targets: moved, previousTargets: initial, stiffness: 0,
-      gravity: [0, 0, 0], delta: 1 / 60, colliders: [] });
-    assert.ok(sim.positions[0].distanceTo(moved[0]) < 1e-6, "native backstop displaced the zero-mass anchor");
-    sim.positions.forEach((p, i) => assert.ok(p.distanceTo(moved[i]) < 1e-6,
-      `vertex ${i}: native skin interpolation repeated the already applied animation transport`));
-  } finally { sim.destroy(); }
-});
+const STEP = 1 / 60;
 
-test("native cloth backstops follow the animated surface normal without freezing outward motion", async () => {
-  const reference = [[0, 0, 0], [.1, 0, 0], [0, .1, 0]].map((v) => new THREE.Vector3(...v));
-  const sim = await createJoltClothSolver({ positions: reference, indices: [0, 1, 2], fixed: new Set(),
-    radius: .003, damping: .8, colliders: [] });
-  const previous = reference.map((p) => p.clone());
-  try {
-    // Normals must come from current skin targets, not the initial +Z plane.
-    for (let frame = 0; frame <= 60; frame++) {
-      const rotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), frame / 60 * Math.PI / 2);
-      const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(rotation);
-      const targets = reference.map((p) => p.clone().applyQuaternion(rotation));
-      sim.step({ targets, previousTargets: previous, stiffness: 0, gravity: normal.clone().multiplyScalar(-60).toArray(),
-        delta: 1 / 60, colliders: [] });
-      sim.positions.forEach((p, i) => assert.ok(p.clone().sub(targets[i]).dot(normal) > -1e-5,
-        `frame ${frame}, vertex ${i}: cloth folded behind its animated surface`));
-      targets.forEach((p, i) => previous[i].copy(p));
-    }
-    // Resets/seeks must replace both the current and previous native skin state.
-    const moved = reference.map((p) => p.clone().add(new THREE.Vector3(10, -3, 5)));
-    sim.reset(moved, []);
-    for (let frame = 0; frame < 5; frame++) sim.step({ targets: moved, previousTargets: moved,
-      stiffness: 0, gravity: [0, 0, -60], delta: 1 / 60, colliders: [] });
-    sim.positions.forEach((p, i) => assert.ok(p.distanceTo(moved[i]) < 1e-5, "reset retained the old backstop"));
-    sim.step({ targets: moved, previousTargets: moved, stiffness: 0,
-      gravity: [0, 0, 60], delta: 1 / 60, colliders: [] });
-    sim.positions.forEach((p, i) => assert.ok(p.z - moved[i].z > .001, "outward cloth response was frozen"));
-    const outward = sim.positions.map((p) => p.clone());
-    sim.step({ targets: moved, previousTargets: moved, stiffness: 0,
-      gravity: [0, 0, 0], delta: 1 / 60, colliders: [] });
-    sim.positions.forEach((p, i) => assert.ok(p.z > outward[i].z + 1e-5,
-      "updating the animated reference discarded physical velocity"));
-  } finally { sim.destroy(); }
-});
-
-test("native finite panels contact the front, have finite bounds, and do not recover deep backside initial states", async () => {
-  for (const [x, z] of [[0, .01], [3, .01], [0, -.1]]) {
-    const targets = [[x, 0, z], [x + .1, 0, z], [x, .1, z]].map((v) => new THREE.Vector3(...v));
-    const pose = { shape: "panel", p: new THREE.Vector3(), q: new THREE.Quaternion(),
-      halfAxes: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(.2, 1, 0)] };
-    const sim = await createJoltClothSolver({ positions: targets, indices: [0, 1, 2], fixed: new Set(),
-      radius: .02, damping: .8, colliders: [pose] });
-    try {
-      for (let i = 0; i < 5; i++) sim.step({ targets, previousTargets: targets, stiffness: 0,
-        gravity: [0, 0, 0], delta: 1 / 60, colliders: [pose] });
-      if (x === 0 && z > 0) assert.ok(sim.positions.every((p) => p.z >= .019), `front contact: ${sim.positions.map((p) => p.z)}`);
-      else sim.positions.forEach((p, i) => assert.ok(p.distanceTo(targets[i]) < 1e-6,
-        z < 0 ? "native triangle contacts do not pull deeply embedded initial points back to the front" : "finite panel must not become an infinite plane"));
-    } finally { sim.destroy(); }
-  }
-});
-
-test("native cloth accepts finite skew panels and updates their animated geometry", async () => {
-  const f = fixture();
-  f.collider.position.set(0, 0, -.01);
-  f.physics.colliders[0] = { shape: "panel", node: 1, offset: [0, 0, 0], halfAxes: [[.7, 0, 0], [.1, .7, 0]] };
-  const sim = await f.create(), cloth = sim.records[0], solver = cloth.solver;
-  for (let i = 0; i < 10; i++) {
-    sim.beforeAnimation(); f.collider.scale.set(1 + i * .01, .9, 1);
-    f.collider.rotation.z = i * .02; f.root.updateMatrixWorld(true); sim.update(1 / 60);
-    assert.equal(cloth.solver, solver);
-    const pose = cloth.colliderPoses()[0];
-    assert.ok(pose.halfAxes[0].distanceTo(new THREE.Vector3(.7, 0, 0).applyMatrix3(new THREE.Matrix3().setFromMatrix4(f.collider.matrixWorld))) < 1e-12);
-    assert.ok(cloth.positions[12].z >= .009, `center must be in front of finite panel: ${cloth.positions[12].z}`);
-    assert.ok(cloth.positions.every((p) => p.toArray().every(Number.isFinite)));
-  }
-  sim.destroy();
-});
-
-function fixture() {
+/** A 2 m x 2 m hanging sheet in the XY plane (normal +Z), pinned along its top row. */
+function fixture({ segments = 16, colliders = [], gravity = [0, 0, 0], extra } = {}) {
   const root = new THREE.Group();
-  const geometry = new THREE.PlaneGeometry(2, 2, 4, 4);
+  const geometry = extra ?? new THREE.PlaneGeometry(2, 2, segments, segments);
   const count = geometry.getAttribute("position").count;
-  const indices = new Uint16Array(count * 4), weights = new Float32Array(count * 4);
-  for (let i = 0; i < count; i += 1) weights[i * 4] = 1;
-  geometry.setAttribute("skinIndex", new THREE.BufferAttribute(indices, 4));
+  geometry.setAttribute("skinIndex", new THREE.BufferAttribute(new Uint16Array(count * 4), 4));
+  const weights = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) weights[i * 4] = 1;
   geometry.setAttribute("skinWeight", new THREE.BufferAttribute(weights, 4));
   const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial());
   const bone = new THREE.Bone(); root.add(bone, mesh);
   mesh.bind(new THREE.Skeleton([bone]));
-  const collider = new THREE.Object3D(); collider.position.set(0.12, -0.35, 0.08); root.add(collider);
-  const cloth = { node: 0, primitive: 0, fixed: [0, 1, 2, 3, 4], radius: 0.02,
-    stiffness: 12, damping: 0.8, gravity: [0, 0, 0], colliders: [0] };
-  const physics = { springs: [], colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: 0.55 }], cloths: [cloth] };
+  const collider = new THREE.Object3D(); root.add(collider);
+  const position = geometry.getAttribute("position");
+  const top = Math.max(...Array.from({ length: count }, (_, i) => position.getY(i)));
+  const fixed = Array.from({ length: count }, (_, i) => i).filter((i) => position.getY(i) > top - 1e-6);
+  const cloth = { node: 0, primitive: 0, fixed, radius: .003, stiffness: 12, damping: .8, gravity,
+    colliders: colliders.map((_, i) => i) };
+  const physics = { springs: [], colliders, cloths: [cloth] };
   const nodes = [mesh, collider];
   const create = () => createMeshCloth(root, [{ physics, resolve: (i) => nodes[i] }]);
+  root.updateMatrixWorld(true);
   return { root, mesh, bone, collider, geometry, cloth, physics, nodes, create };
 }
 
-test("frozen-pose warmup samples colliders once and matches thirty independent physics steps", async () => {
-  const f = fixture(), sim = await f.create(), cloth = sim.records[0];
-  try {
-    cloth.sampleTargets();
-    const colliderPoses = cloth.colliderPoses.bind(cloth);
-    let samples = 0;
-    cloth.colliderPoses = () => { samples++; return colliderPoses(); };
-    cloth.warmupSteps = 30; cloth.initialize();
-    assert.equal(samples, 1);
-    const settled = cloth.solver.positions.map((p) => p.clone());
-    cloth.solver.reset(cloth.targets, colliderPoses(), cloth.radius());
-    for (let i = 0; i < 30; i++) cloth.step(1);
-    settled.forEach((p, i) => assert.ok(p.distanceTo(cloth.solver.positions[i]) < 1e-6));
-    // A subsequent reset at another pose must replace the cached reference.
-    f.bone.position.set(2, -1, .4); f.root.updateMatrixWorld(true);
-    cloth.sampleTargets(); cloth.initialize();
-    cloth.topology.fixed.forEach((i) => assert.ok(cloth.solver.positions[i].distanceTo(cloth.targets[i]) < 1e-6));
-    assert.ok(cloth.solver.positions.every((p) => p.toArray().every(Number.isFinite)));
-  } finally { sim.destroy(); }
-});
+function run(f, sim, frames, before = () => {}) {
+  for (let i = 0; i < frames; i++) {
+    sim.beforeAnimation(); before(i); f.root.updateMatrixWorld(true); sim.update(STEP);
+  }
+}
+
+/** Displayed world position, after the GPU's own skinning of the written attribute. */
+function world(mesh, index) {
+  mesh.updateMatrixWorld(true);
+  return mesh.getVertexPosition(index, new THREE.Vector3()).applyMatrix4(mesh.matrixWorld);
+}
+
+function vertexAt(f, x, y) {
+  const position = f.geometry.getAttribute("position");
+  let best = 0;
+  for (let i = 1; i < position.count; i++) {
+    if (Math.hypot(position.getX(i) - x, position.getY(i) - y) < Math.hypot(position.getX(best) - x, position.getY(best) - y)) best = i;
+  }
+  return best;
+}
+
+function moving(f) {
+  const fixed = new Set(f.cloth.fixed);
+  return Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i).filter((i) => !fixed.has(i));
+}
 
 test("cloth fixed indices are bounded and topology retains skin bindings", () => {
-  const f = fixture();
+  const f = fixture({ segments: 4 });
   const topology = clothTopology(f.geometry, f.cloth.fixed);
   assert.equal(topology.vertices.length, 25);
   assert.equal(topology.indices.length, 96);
@@ -144,7 +74,7 @@ test("cloth fixed indices are bounded and topology retains skin bindings", () =>
 });
 
 test("inverse weighted skin matrix undoes skinning with rotation and nonuniform scaling", () => {
-  const f = fixture();
+  const f = fixture({ segments: 4 });
   f.root.scale.set(1.2, 0.9, 1.4); f.root.rotation.y = 0.35;
   f.bone.rotation.x = 0.4; f.bone.position.z = 0.25;
   f.root.updateMatrixWorld(true);
@@ -153,603 +83,620 @@ test("inverse weighted skin matrix undoes skinning with rotation and nonuniform 
   assert.ok(displayed.applyMatrix4(vertexSkinMatrix(f.mesh, 7).invert()).distanceTo(original) < 1e-6);
 });
 
-test("real soft body reduces overlap, pins follow skinning and toggle restores attributes", async () => {
+/** Two layers of the same sheet (a lining 2 mm behind), a seam and a loose tag. */
+function layeredGeometry() {
+  const outer = new THREE.PlaneGeometry(2, 2, 8, 8);
+  const lining = new THREE.PlaneGeometry(2, 2, 8, 8).translate(0, 0, -.002);
+  const tag = new THREE.PlaneGeometry(.2, .2, 1, 1).translate(0, -.6, .01);
+  const merged = [outer, lining, tag];
+  const positions = [], normals = [], indices = [];
+  let base = 0;
+  for (const g of merged) {
+    positions.push(...g.getAttribute("position").array);
+    normals.push(...g.getAttribute("normal").array);
+    indices.push(...Array.from(g.index.array, (i) => i + base));
+    base += g.getAttribute("position").count;
+  }
+  // A UV seam: duplicate the outer sheet's centre vertex and use the copy in one triangle.
+  const centre = 40, seam = base;
+  positions.push(...outer.getAttribute("position").array.slice(centre * 3, centre * 3 + 3));
+  normals.push(0, 0, 1);
+  const t = indices.findIndex((v, i) => v === centre && i < outer.index.count);
+  indices[t] = seam;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
+  return { geometry, outer: 81, lining: 81, tag: 4, centre, seam };
+}
+
+test("proxy reduction joins seams and layers, and attaches detached pieces to the garment", () => {
+  const layered = layeredGeometry();
+  const f = fixture({ extra: layered.geometry });
+  const proxy = buildClothProxy(f.geometry, f.cloth.fixed);
+  assert.ok(proxy.count < proxy.topology.vertices.length / 2, `expected a reduction, got ${proxy.count} proxies`);
+  assert.equal(proxy.renderCluster[layered.centre], proxy.renderCluster[layered.seam], "a UV seam split the proxy");
+  assert.equal(proxy.renderCluster[layered.centre], proxy.renderCluster[layered.outer + layered.centre], "the lining separated from its layer");
+  // Every proxy island must be linked to a fixed particle.
+  const parent = Array.from({ length: proxy.count }, (_, i) => i);
+  const find = (x) => parent[x] === x ? x : (parent[x] = find(parent[x]));
+  for (let e = 0; e < proxy.edges.length; e += 2) parent[find(proxy.edges[e])] = find(proxy.edges[e + 1]);
+  const anchored = new Set([...proxy.fixed.keys()].filter((i) => proxy.fixed[i]).map(find));
+  for (let i = 0; i < proxy.count; i++) assert.ok(anchored.has(find(i)), `proxy ${i} floats free of the garment`);
+  // Weights form a partition of unity over existing proxies.
+  for (const v of proxy.members) {
+    let total = 0;
+    for (let k = 0; k < 4; k++) if (proxy.weights.indices[v * 4 + k] >= 0) total += proxy.weights.weights[v * 4 + k];
+    assert.ok(Math.abs(total - 1) < 1e-5, `vertex ${v} weights sum to ${total}`);
+  }
+});
+
+test("source proxy clusters are honoured and validated", () => {
+  const f = fixture({ segments: 4 });
+  const count = f.geometry.getAttribute("position").count;
+  // Rows of the sheet as proxies: five per row, two columns merged.
+  const vertices = Array.from({ length: count }, (_, i) => Math.floor(i / 5) * 3 + Math.min(2, (i % 5) >> 1));
+  const proxy = buildClothProxy(f.geometry, f.cloth.fixed, { vertices });
+  assert.equal(proxy.count, 15);
+  assert.ok(proxy.fixed.some(Boolean) && !proxy.fixed.every(Boolean));
+  assert.throws(() => buildClothProxy(f.geometry, f.cloth.fixed, { vertices: vertices.slice(1) }), /覆盖全部/);
+  assert.throws(() => buildClothProxy(f.geometry, f.cloth.fixed, { vertices: vertices.map((v, i) => i ? v : -1) }), /无效/);
+});
+
+test("fixed regions away from moving cloth are left to animation", () => {
+  const f = fixture({ segments: 16 });
+  const position = f.geometry.getAttribute("position");
+  // Only the bottom row moves.
+  const fixed = Array.from({ length: position.count }, (_, i) => i).filter((i) => position.getY(i) > -.99);
+  const proxy = buildClothProxy(f.geometry, fixed);
+  const full = buildClothProxy(f.geometry, fixed, { vertices: Array.from({ length: position.count }, (_, i) => i) });
+  assert.ok(full.count < position.count, "far fixed proxies were not dropped");
+  assert.ok(proxy.members.every((v) => position.getY(v) < 0), "a distant fixed vertex is still sampled");
+});
+
+test("at rest the cloth reproduces the animated skinning exactly", async () => {
   const f = fixture();
-  const sourcePosition = f.geometry.getAttribute("position");
-  const sourceNormal = f.geometry.getAttribute("normal");
-  const originalArray = Array.from(sourcePosition.array);
-  const sharedPass = new THREE.Mesh(f.geometry, f.mesh.material);
+  const source = Array.from(f.geometry.getAttribute("position").array);
   const sim = await f.create();
-  assert.equal(sharedPass.geometry, f.geometry);
-  sim.beforeAnimation(); sim.update(1 / 60);
-  const center = f.mesh.getVertexPosition(17, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld);
-  assert.ok(center.distanceTo(f.collider.position) >= 0.50, `distance ${center.distanceTo(f.collider.position)}`);
-  assert.deepEqual(Array.from(sourcePosition.array), originalArray);
-  assert.ok([...f.geometry.getAttribute("position").array, ...f.geometry.getAttribute("normal").array].every(Number.isFinite));
-  sim.beforeAnimation();
-  f.bone.position.x = 0.25; f.bone.rotation.z = 0.15; f.root.updateMatrixWorld(true);
-  const expected = f.mesh.getVertexPosition(0, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld);
-  sim.update(1 / 60);
-  const actual = f.mesh.getVertexPosition(0, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld);
-  assert.ok(actual.distanceTo(expected) < 1e-5);
-  sim.setEnabled(false);
-  assert.deepEqual(Array.from(f.geometry.getAttribute("position").array), originalArray);
-  sim.destroy();
+  try {
+    run(f, sim, 20, (i) => { f.bone.rotation.set(.3, .2 + i * .01, -.1); f.bone.position.set(.4, -.2, .1); f.root.scale.set(1.1, .9, 1); });
+    const animated = f.mesh.clone(); animated.geometry = f.geometry.clone();
+    animated.geometry.setAttribute("position", new THREE.Float32BufferAttribute(source, 3));
+    animated.skeleton = f.mesh.skeleton; animated.bindMatrix = f.mesh.bindMatrix; animated.bindMatrixInverse = f.mesh.bindMatrixInverse;
+    f.root.add(animated); f.root.updateMatrixWorld(true);
+    for (let i = 0; i < source.length / 3; i++) {
+      // Rigid animation of the whole sheet is pure transport: no deformation.
+      assert.ok(world(f.mesh, i).distanceTo(world(animated, i)) < 1e-4, `vertex ${i} drifted from its skinned pose`);
+    }
+  } finally { sim.destroy(); }
+});
+
+test("pins follow skinning and movable vertices stay clear of a sphere pushing into the cloth", async () => {
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .3 }] });
+  const sim = await f.create();
+  try {
+    run(f, sim, 90, (i) => {
+      f.collider.position.set(0, -.3, -.4 + Math.min(1, i / 45) * .45);
+      f.bone.position.x = Math.sin(i * .1) * .05;
+    });
+    const centre = f.collider.getWorldPosition(new THREE.Vector3());
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).distanceTo(centre) > .3 + .002, `vertex ${i} is inside the sphere`);
+    const skin = vertexSkinMatrix(f.mesh, f.cloth.fixed[0]).premultiply(f.mesh.matrixWorld);
+    const pinned = new THREE.Vector3().fromBufferAttribute(sim.records[0].sourcePosition, f.cloth.fixed[0]).applyMatrix4(skin);
+    assert.ok(world(f.mesh, f.cloth.fixed[0]).distanceTo(pinned) < 1e-6, "a fixed vertex left its skinned pose");
+    assert.ok(world(f.mesh, vertexAt(f, 0, -.3)).z > .1, "the sphere did not push the cloth");
+  } finally { sim.destroy(); }
+});
+
+test("a collider crossing the cloth within one frame pushes it instead of tunnelling", async () => {
+  // Wider than the proxy spacing: thinner bodies can pass between sparse
+  // particles, as with point collision in the source engine.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .2 }] });
+  f.collider.position.set(0, -.25, -.4);
+  const sim = await f.create();
+  try {
+    run(f, sim, 5);
+    // 0.5 m in one 1/60 s step: the sphere centre ends in front of the sheet.
+    run(f, sim, 1, () => f.collider.position.set(0, -.25, .1));
+    const centre = f.collider.getWorldPosition(new THREE.Vector3());
+    let checked = 0;
+    for (const i of moving(f)) {
+      const p = world(f.mesh, i);
+      if (Math.hypot(p.x - centre.x, p.y - centre.y) > .1) continue;
+      checked++;
+      assert.ok(p.z > centre.z, `vertex ${i} was left behind the sphere`);
+    }
+    assert.ok(checked > 0, "no vertex lies in the sphere's path");
+  } finally { sim.destroy(); }
+});
+
+test("the fabric between sparse proxy particles clears a limb, not just the particles", async () => {
+  // Source proxies of 4 x 4 vertex blocks (0.5 m apart); a sphere presses
+  // between four of them from behind.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .15 }] });
+  const position = f.geometry.getAttribute("position");
+  const block = (i) => Math.min(3, Math.floor((position.getX(i) + 1) / .5)) + 4 * Math.min(3, Math.floor((1 - position.getY(i)) / .5));
+  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
+  f.collider.position.set(0, -.5, -.3);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60, (i) => f.collider.position.set(0, -.5, -.3 + Math.min(1, i / 30) * .35));
+    const centre = f.collider.getWorldPosition(new THREE.Vector3());
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).distanceTo(centre) > .15 + .002, `vertex ${i} sags into the sphere`);
+  } finally { sim.destroy(); }
+});
+
+test("a lining pushed by a limb stays behind the fabric in front of it", async () => {
+  // Outer sheet with a lining 5 mm behind it, both in one cloth primitive.
+  const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.005);
+  const n = outer.getAttribute("position").count;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([...outer.getAttribute("position").array, ...lining.getAttribute("position").array], 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute([...outer.getAttribute("normal").array, ...outer.getAttribute("normal").array], 3));
+  geometry.setIndex([...outer.index.array, ...Array.from(outer.index.array, (i) => i + n)]);
+  const f = fixture({ extra: geometry, colliders: [{ shape: "capsule", node: 1, offset: [0, 0, 0], radius: .12, tail: { node: 1, offset: [.6, -.4, 0] } }] });
+  const sim = await f.create();
+  try {
+    run(f, sim, 90, (i) => { f.collider.position.set(-.3, -.2, -.25 + Math.min(1, i / 40) * .3); f.collider.rotation.z = Math.sin(i * .1) * .4; });
+    let pushed = 0;
+    for (let i = 0; i < n; i++) {
+      const front = world(f.mesh, i), back = world(f.mesh, i + n);
+      pushed = Math.max(pushed, front.z);
+      assert.ok(back.z < front.z + 1e-4, `lining vertex ${i} came through the outer fabric`);
+    }
+    assert.ok(pushed > .05, "the limb never reached the cloth");
+  } finally { sim.destroy(); }
+});
+
+test("cloth never folds behind its animated surface", async () => {
+  const f = fixture({ gravity: [0, 0, -60] });
+  const sim = await f.create(), record = sim.records[0];
+  try {
+    run(f, sim, 60);
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).z > -1e-5, `vertex ${i} folded behind the sheet`);
+    // The simulated proxies themselves respect it, not only their writeback.
+    for (let i = 0; i < record.proxy.count; i++) assert.ok(record.solver.positions[i * 3 + 2] > -1e-5, `proxy ${i} folded behind the sheet`);
+  } finally { sim.destroy(); }
+});
+
+test("double-sided cloth has no backstop where its faces disagree on the outside", async () => {
+  // Back faces first: same positions, reversed winding and normals.
+  const front = new THREE.PlaneGeometry(2, 2, 16, 16), count = front.getAttribute("position").count;
+  const positions = [...front.getAttribute("position").array, ...front.getAttribute("position").array];
+  const normals = [...Array.from({ length: count }, () => [0, 0, -1]).flat(), ...front.getAttribute("normal").array];
+  const index = Array.from(front.index.array);
+  const back = [];
+  for (let t = 0; t < index.length; t += 3) back.push(index[t], index[t + 2], index[t + 1]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex([...back, ...index.map((i) => i + count)]);
+  for (const gravity of [[0, 0, 60], [0, 0, -60]]) {
+    const f = fixture({ extra: geometry.clone(), gravity });
+    const sim = await f.create();
+    try {
+      run(f, sim, 60);
+      const z = world(f.mesh, vertexAt(f, 0, -.9)).z;
+      assert.ok(Math.sign(z) === Math.sign(gravity[2]) && Math.abs(z) > .05, `the cloth could not move towards ${gravity[2]}: z=${z}`);
+    } finally { sim.destroy(); }
+  }
+});
+
+test("displacement stays within the motion limit and relaxes back to the animation", async () => {
+  const f = fixture({ gravity: [0, 0, 400] });
+  const sim = await f.create(), record = sim.records[0];
+  try {
+    run(f, sim, 120);
+    const { positions } = record.solver, { targets, maxDistance } = record;
+    let pushed = 0;
+    for (let i = 0; i < record.proxy.count; i++) {
+      const d = Math.hypot(positions[i * 3] - targets[i * 3], positions[i * 3 + 1] - targets[i * 3 + 1], positions[i * 3 + 2] - targets[i * 3 + 2]);
+      assert.ok(d <= maxDistance[i] + 1e-9, `proxy ${i} exceeds its motion limit`);
+      pushed = Math.max(pushed, d);
+    }
+    assert.ok(pushed > .1, "the force did not move the cloth");
+    f.cloth.gravity = [0, 0, 0];
+    run(f, sim, 90);
+    for (const i of moving(f)) assert.ok(Math.abs(world(f.mesh, i).z) < .01, `vertex ${i} did not return to its animated pose`);
+  } finally { sim.destroy(); }
+});
+
+test("a detached piece without fixed vertices follows its garment", async () => {
+  const layered = layeredGeometry();
+  const f = fixture({ extra: layered.geometry });
+  const sim = await f.create();
+  try {
+    run(f, sim, 120, (i) => { f.bone.position.set(Math.sin(i * .2) * .3, 0, Math.cos(i * .15) * .2); f.bone.rotation.y = Math.sin(i * .1) * .5; });
+    const tag = layered.outer + layered.lining;
+    const anchor = world(f.mesh, 58), sheet = new THREE.Vector3().fromBufferAttribute(f.geometry.getAttribute("position"), 58);
+    for (let k = 0; k < layered.tag; k++) {
+      const offset = new THREE.Vector3().fromBufferAttribute(sim.records[0].sourcePosition, tag + k).sub(sheet);
+      const now = world(f.mesh, tag + k).sub(anchor);
+      assert.ok(now.distanceTo(offset.applyQuaternion(f.bone.quaternion)) < .08, `tag vertex ${k} drifted from the sheet`);
+    }
+  } finally { sim.destroy(); }
+});
+
+test("toggling and destroying restore the source attributes", async () => {
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .4 }] });
+  f.collider.position.set(0, -.5, .2);
+  const sourcePosition = f.geometry.getAttribute("position"), sourceNormal = f.geometry.getAttribute("normal");
+  const original = Array.from(sourcePosition.array);
+  const sim = await f.create();
+  try {
+    run(f, sim, 20);
+    assert.notDeepEqual(Array.from(f.geometry.getAttribute("position").array), original, "the cloth did not deform");
+    sim.setEnabled(false);
+    assert.deepEqual(Array.from(f.geometry.getAttribute("position").array), original);
+    sim.update(STEP);
+    assert.deepEqual(Array.from(f.geometry.getAttribute("position").array), original, "a disabled cloth still wrote geometry");
+    sim.setEnabled(true); run(f, sim, 5);
+  } finally { sim.destroy(); }
   assert.equal(f.geometry.getAttribute("position"), sourcePosition);
   assert.equal(f.geometry.getAttribute("normal"), sourceNormal);
-  assert.equal(f.mesh.frustumCulled, true);
+  assert.deepEqual(Array.from(sourcePosition.array), original, "the source attribute was modified");
 });
 
-test("changing cross-node capsule dimensions preserve the solver and contact clearance", async () => {
-  const f = fixture();
-  const tail = new THREE.Object3D(); tail.position.set(.12, -.7, .08);
-  f.root.add(tail); f.nodes.push(tail);
-  f.physics.colliders[0] = { shape: "capsule", node: 1, offset: [0, 0, 0], radius: 0.3,
-    tail: { node: 2, offset: [0, 0, 0] } };
-  const sim = await f.create();
-  const solver = sim.records[0].solver;
-  const local = new THREE.Vector3();
-  for (let i = 0; i < 21; i += 1) {
-    sim.beforeAnimation(); f.collider.position.y += 0.005;
-    f.collider.scale.set(1 + i * .005, 1, 1);
-    if (i === 20) tail.position.copy(f.collider.position);
-    f.root.updateMatrixWorld(true);
-    if (i === 10) sim.reset();
-    sim.update(1 / 60);
-    assert.ok(Array.from(f.geometry.getAttribute("position").array).every(Number.isFinite));
-    const cloth = sim.records[0], collider = cloth.colliders[0];
-    const pose = cloth.colliderPose(collider);
-    assert.equal(cloth.solver, solver, "dimension changes must not rebuild the solver");
-    assert.ok(Math.abs(pose.radius - .3 * (1 + i * .005)) < 1e-6);
-    if (i === 20) assert.ok(pose.height < 1e-8, "coincident endpoints become a sphere");
-    const inverseRotation = pose.q.clone().invert();
-    for (let j = 0; j < cloth.positions.length; j++) {
-      if (cloth.topology.fixed.has(j)) continue;
-      local.copy(cloth.positions[j]).sub(pose.p).applyQuaternion(inverseRotation);
-      const distance = Math.hypot(local.x, Math.max(0, Math.abs(local.y) - pose.height / 2), local.z);
-      assert.ok(distance >= pose.radius + f.cloth.radius - 1e-5, `frame ${i}, vertex ${j}: capsule distance ${distance}`);
-    }
-  }
-  sim.destroy();
-});
-
-test("relative Morph remains part of the animated cloth baseline without feedback", async () => {
+test("relative Morph remains part of the animated baseline without feedback", async () => {
   const f = fixture();
   const count = f.geometry.getAttribute("position").count;
   const delta = new Float32Array(count * 3);
-  for (let i = 0; i < count; i += 1) delta[i * 3 + 2] = 0.12;
+  for (let i = 0; i < count; i++) delta[i * 3 + 2] = .05;
   f.geometry.morphAttributes.position = [new THREE.BufferAttribute(delta, 3)];
   f.geometry.morphTargetsRelative = true;
-  f.mesh.updateMorphTargets(); f.mesh.morphTargetInfluences[0] = 0.5;
+  f.mesh.updateMorphTargets(); f.mesh.morphTargetInfluences[0] = 1;
   const sim = await f.create();
-  for (let i = 0; i < 15; i += 1) {
-    sim.beforeAnimation(); f.root.updateMatrixWorld(true);
-    const expected = f.mesh.getVertexPosition(0, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld);
-    sim.update(1 / 60);
-    const actual = f.mesh.getVertexPosition(0, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld);
-    assert.ok(actual.distanceTo(expected) < 1e-5);
-    assert.ok(Math.abs(actual.z - 0.06) < 1e-5);
+  try {
+    run(f, sim, 30);
+    for (let i = 0; i < count; i++) assert.ok(Math.abs(world(f.mesh, i).z - .05) < 1e-4, `vertex ${i} lost or doubled its Morph`);
+    f.mesh.morphTargetInfluences[0] = 0;
+    run(f, sim, 30);
+    for (let i = 0; i < count; i++) assert.ok(Math.abs(world(f.mesh, i).z) < .01, `vertex ${i} kept the removed Morph`);
+  } finally { sim.destroy(); }
+});
+
+test("tapered capsule pieces collapse into one collider without shrinking it", async () => {
+  // Converter output: a 0.1 -> 0.05 m taper split into piecewise envelopes.
+  const pieces = 5, colliders = [];
+  for (let i = 0; i < pieces; i++) {
+    const a = i / pieces, b = (i + 1) / pieces;
+    colliders.push({ shape: "capsule", node: 1, offset: [0, -a, 0], radius: Math.max(.1 - .05 * a, .1 - .05 * b),
+      tail: { node: 1, offset: [0, -b, 0] } });
   }
-  sim.destroy();
+  colliders.push({ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .02 });
+  const f = fixture({ colliders });
+  f.collider.position.set(0, .2, -.06);
+  const sim = await f.create();
+  try {
+    const shapes = sim.records[0].colliders;
+    assert.equal(shapes.length, 2);
+    assert.deepEqual(shapes[0].radius, [.1, .06]);
+    run(f, sim, 30);
+    // The rebuilt cone still encloses the source taper everywhere.
+    let touched = false;
+    for (const i of moving(f)) {
+      const local = world(f.mesh, i).sub(f.collider.getWorldPosition(new THREE.Vector3()));
+      if (local.y > 0 || local.y < -1) continue;
+      const taper = .1 - .05 * -local.y, distance = Math.hypot(local.x, local.z);
+      assert.ok(distance >= taper + .003 - 1e-6, `vertex ${i} is inside the tapered capsule`);
+      touched ||= distance < taper + .01;
+    }
+    assert.ok(touched, "the capsule never touched the cloth");
+  } finally { sim.destroy(); }
 });
 
-test("world normal writeback inverts skin-normal transform rather than double skinning", async () => {
-  const f = fixture();
-  f.root.scale.set(1.2, 0.9, 1.4); f.root.rotation.y = 0.35;
-  f.bone.rotation.x = 0.4; f.bone.position.z = 0.25;
-  f.root.updateMatrixWorld(true);
-  const sim = await f.create(); sim.beforeAnimation(); sim.update(1 / 60);
-  const cloth = sim.records[0], vertex = 17;
-  const expected = cloth.normals[cloth.topology.mapping[vertex]].clone().normalize();
-  const actual = new THREE.Vector3().fromBufferAttribute(f.geometry.getAttribute("normal"), vertex)
-    .applyMatrix3(new THREE.Matrix3().setFromMatrix4(vertexSkinMatrix(f.mesh, vertex)))
-    .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(f.mesh.matrixWorld));
-  assert.ok(actual.distanceTo(expected) < 1e-5);
-  sim.destroy();
+test("steep tapered capsules are the envelope of their spheres, not a radius-per-projection cone", async () => {
+  // A short, strongly tapered thigh piece (0.095 -> 0.13 m over 8.5 cm),
+  // as the converter splits it; lying across the sheet just behind it.
+  const pieces = 8, colliders = [];
+  for (let i = 0; i < pieces; i++) {
+    const a = i / pieces, b = (i + 1) / pieces;
+    colliders.push({ shape: "capsule", node: 1, offset: [-.04 + .085 * a, 0, 0], radius: .09 + .04 * b,
+      tail: { node: 1, offset: [-.04 + .085 * b, 0, 0] } });
+  }
+  const f = fixture({ colliders });
+  f.collider.position.set(.1, -.4, -.12);
+  const sim = await f.create();
+  try {
+    assert.equal(sim.records[0].colliders.length, 1);
+    run(f, sim, 30);
+    const [r0, r1] = sim.records[0].colliders[0].radius, start = new THREE.Vector3(-.04, 0, 0), axis = new THREE.Vector3(.085, 0, 0);
+    let touched = false;
+    for (const i of moving(f)) {
+      const local = world(f.mesh, i).sub(f.collider.getWorldPosition(new THREE.Vector3()));
+      let clearance = Infinity;
+      for (let k = 0; k <= 400; k++) {
+        const u = k / 400;
+        clearance = Math.min(clearance, local.distanceTo(start.clone().addScaledVector(axis, u)) - (r0 + (r1 - r0) * u));
+      }
+      assert.ok(clearance >= .003 - 2e-4, `vertex ${i} is ${(.003 - clearance) * 1000} mm inside the tapered capsule`);
+      touched ||= clearance < .01;
+    }
+    assert.ok(touched, "the capsule never touched the cloth");
+  } finally { sim.destroy(); }
 });
 
-test("no mesh cloth avoids loading or changing model data", async () => {
-  const f = fixture(), position = f.geometry.getAttribute("position");
-  const sim = await createMeshCloth(f.root, []);
-  sim.beforeAnimation(); sim.update(0); sim.reset(); sim.setEnabled(false); sim.destroy();
-  assert.equal(f.geometry.getAttribute("position"), position);
-});
-
-test("animated rest shape follows changing skin stretch instead of collapsing toward initial links", async () => {
-  for (const rate of [30, 60, 120]) {
-    const f = fixture();
-    f.physics.colliders = []; f.cloth.colliders = [];
+test("finite panels contact the front, have finite bounds and leave deep backside states alone", async () => {
+  const cases = [
+    { offset: [0, -.3, -.01], expect: "front" },
+    { offset: [5, -.3, -.01], expect: "untouched" },
+    { offset: [0, -.3, .2], expect: "untouched" },
+  ];
+  for (const { offset, expect } of cases) {
+    const f = fixture({ colliders: [{ shape: "panel", node: 1, offset: [0, 0, 0], halfAxes: [[.5, 0, 0], [.1, .5, 0]] }] });
+    f.collider.position.fromArray(offset);
     const sim = await f.create();
-    sim.beforeAnimation(); sim.update(0);
-    const persistentSolver = sim.records[0].solver;
-    const expected = new THREE.Vector3(), actual = new THREE.Vector3();
-    for (let frame = 1; frame <= rate; frame += 1) {
-      sim.beforeAnimation();
-      const t = frame / rate;
-      f.bone.scale.x = 1 + .3 * t; f.bone.position.x = .2 * t;
-      f.bone.rotation.y = .25 * t;
-      f.root.updateMatrixWorld(true);
-      f.mesh.getVertexPosition(22, expected).applyMatrix4(f.mesh.matrixWorld);
-      sim.update(1 / rate);
-      assert.equal(sim.records[0].solver, persistentSolver, "animation must reuse the initialized solver");
-      f.mesh.getVertexPosition(22, actual).applyMatrix4(f.mesh.matrixWorld);
-      assert.ok(actual.distanceTo(expected) < .001, `${rate} Hz frame ${frame}: ${actual.distanceTo(expected)}`);
-    }
-    sim.destroy();
-  }
-});
-
-test("initial collider placement does not inject a world-origin-dependent impulse", async () => {
-  const results = [];
-  for (const offset of [0, 10]) {
-    const f = fixture();
-    f.root.position.x = offset; f.root.updateMatrixWorld(true);
-    const sim = await f.create(); sim.beforeAnimation(); sim.update(0);
-    results.push(sim.records[0].positions.map((p) => p.clone().sub(f.root.position)));
-    sim.destroy();
-  }
-  for (let i = 0; i < results[0].length; i += 1) {
-    assert.ok(results[0][i].distanceTo(results[1][i]) < 1e-4, `vertex ${i} depends on world origin`);
-  }
-});
-
-test("two-step reset resolves native cloth contacts immediately after a large teleport", async () => {
-  const f = fixture(), sim = await f.create();
-  sim.beforeAnimation(); sim.update(0);
-  for (const offset of [[10, 0, 0], [0, -10, 0], [0, 0, 20]]) {
-    sim.beforeAnimation(); f.root.position.fromArray(offset); f.root.updateMatrixWorld(true);
-    // The first native step refreshes cached cloth bounds; the second must
-    // resolve the new-position contacts before this reset frame is drawn.
-    sim.reset(2); sim.update(0);
-    const cloth = sim.records[0], pose = cloth.colliderPose(cloth.colliders[0]);
-    cloth.positions.forEach((p, i) => {
-      if (cloth.topology.fixed.has(i)) {
-        assert.ok(p.distanceTo(cloth.targets[i]) < 1e-6);
-      } else {
-        const clearance = p.distanceTo(pose.p) - pose.radius - f.cloth.radius;
-        assert.ok(clearance >= -1e-5, `teleport ${offset}, vertex ${i}: clearance ${clearance}`);
+    try {
+      run(f, sim, 30);
+      const near = moving(f).filter((i) => Math.abs(world(f.mesh, i).x - offset[0]) < .3 && Math.abs(world(f.mesh, i).y - offset[1]) < .3);
+      for (const i of near) {
+        const z = world(f.mesh, i).z;
+        if (expect === "front") assert.ok(z >= offset[2] + .002, `vertex ${i} passed through the panel front`);
+        else assert.ok(Math.abs(z) < 1e-4, `vertex ${i} was moved by a panel it does not touch`);
       }
-    });
+    } finally { sim.destroy(); }
   }
-  sim.destroy();
 });
 
-test("animated reference lengths recover compressed particles without rebuilding the solver", async () => {
-  const f = fixture(); f.physics.colliders = []; f.cloth.colliders = [];
-  f.cloth.stiffness = 0;
-  const sim = await f.create(); sim.beforeAnimation(); sim.update(0);
-  const cloth = sim.records[0];
-  const solver = cloth.solver;
-  const compressed = cloth.targets.map((p, i) => {
-    const value = p.clone();
-    if (!cloth.topology.fixed.has(i)) value.x *= .2;
-    return value;
-  });
-  solver.reset(compressed, cloth.colliderPoses(), cloth.radius());
-  for (let i = 0; i < 60; i += 1) cloth.step(1);
-  // The native cloth may fold after extreme compression. Measure the material
-  // edge lengths, not the projected X span of that folded surface.
-  const lengths = [20, 21, 22, 23].map((i) => solver.positions[i].distanceTo(solver.positions[i + 1]));
-  const recoveredLength = lengths.reduce((sum, length) => sum + length, 0);
-  assert.equal(cloth.solver, solver);
-  assert.ok(recoveredLength > 1.8, `reference edges retained their compressed rest lengths: ${recoveredLength}`);
-  for (const length of lengths) assert.ok(Math.abs(length - .5) < .06, `reference edge length was not restored: ${length}`);
-  sim.destroy();
-});
-
-test("native cloth contacts keep movable vertices outside moving colliders", async () => {
-  const f = fixture(); const sim = await f.create();
-  for (let frame = 0; frame < 30; frame += 1) {
-    sim.beforeAnimation();
-    f.collider.position.x = .12 + .2 * Math.sin(frame / 10);
-    f.root.updateMatrixWorld(true); sim.update(1 / 60);
-    const cloth = sim.records[0];
-    for (let i = 0; i < cloth.positions.length; i += 1) {
-      if (cloth.topology.fixed.has(i)) continue;
-      const distance = cloth.positions[i].distanceTo(f.collider.position);
-      assert.ok(distance >= .55 + .02 - 1e-6, `frame ${frame}, vertex ${i}: ${distance}`);
-    }
-  }
-  sim.destroy();
-});
-
-test("plane contacts respect transformed normals and the mesh-scaled cloth radius", async () => {
-  const f = fixture();
-  f.root.scale.setScalar(1.5); f.root.rotation.y = .3;
-  f.collider.position.set(0, 0, -.01);
-  f.physics.colliders[0] = { shape: "plane", node: 1, offset: [0, 0, 0], normal: [0, 0, 1] };
-  f.root.updateMatrixWorld(true);
+test("plane contacts respect transformed normals and the mesh-scaled gap", async () => {
+  const f = fixture({ colliders: [{ shape: "plane", node: 1, offset: [0, 0, 0], normal: [0, 1, 0] }] });
+  f.collider.rotation.x = Math.PI / 2; f.collider.position.set(0, 0, .05);
+  f.root.scale.setScalar(2);
   const sim = await f.create();
-  sim.beforeAnimation(); sim.update(0);
-  const cloth = sim.records[0], solver = cloth.solver;
-  for (const scale of [1.5, 2]) {
-    sim.beforeAnimation(); f.root.scale.setScalar(scale); f.root.updateMatrixWorld(true);
-    sim.reset(); sim.update(1 / 60);
-    const pose = cloth.colliderPose(cloth.colliders[0]);
-    const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(pose.q);
-    cloth.positions.forEach((p, i) => {
-      if (!cloth.topology.fixed.has(i)) {
-        const distance = p.clone().sub(pose.p).dot(normal);
-        assert.ok(distance >= f.cloth.radius * scale - 1e-5, `scale ${scale}, vertex ${i}: ${distance}`);
-      }
-    });
-    assert.equal(cloth.solver, solver);
-  }
-  sim.destroy();
+  try {
+    run(f, sim, 30);
+    for (const i of moving(f)) assert.ok(world(f.mesh, i).z >= .1 + .006 - 1e-6, `vertex ${i} is behind the scaled plane`);
+  } finally { sim.destroy(); }
 });
 
-test("independent cloth instances do not share colliders and survive another instance's destruction", async () => {
-  const a = fixture(), b = fixture();
-  b.physics.colliders = []; b.cloth.colliders = [];
-  const first = await a.create(), second = await b.create();
-  for (let frame = 0; frame < 4; frame++) {
-    first.beforeAnimation(); first.update(1 / 60);
-    second.beforeAnimation(); second.update(1 / 60);
-  }
-  const baseline = second.records[0].targets[17];
-  assert.ok(second.records[0].positions[17].distanceTo(baseline) < 1e-5);
-  assert.ok(first.records[0].positions[17].distanceTo(baseline) > .05);
-  first.destroy(); first.destroy();
-  const solver = second.records[0].solver;
-  for (let frame = 0; frame < 4; frame++) {
-    second.beforeAnimation(); b.bone.position.x += .01; b.root.updateMatrixWorld(true);
-    second.update(1 / 60);
-    assert.equal(second.records[0].solver, solver);
-    second.records[0].positions.forEach((p, i) => assert.ok(p.distanceTo(second.records[0].targets[i]) < 1e-5));
-  }
-  second.destroy(); second.destroy();
+test("independent cloth instances keep separate colliders and state", async () => {
+  const a = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .3 }] });
+  const b = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .3 }] });
+  a.collider.position.set(0, -.4, .1); b.collider.position.set(0, -.4, -5);
+  const simA = await a.create(), simB = await b.create();
+  try {
+    run(a, simA, 30); run(b, simB, 30);
+    simA.destroy();
+    run(b, simB, 10);
+    for (const i of moving(b)) assert.ok(Math.abs(world(b.mesh, i).z) < 1e-4, "another instance's collider moved this cloth");
+  } finally { simA.destroy(); simB.destroy(); }
 });
 
-test("cloth collisions survive partial disposal and complete destroy/recreate cycles", async () => {
-  const a = fixture(), b = fixture();
-  const first = await a.create();
-  let second = await b.create();
-  first.beforeAnimation(); first.update(1 / 60);
-  first.destroy();
-  const checkContacts = () => {
-    const cloth = second.records[0];
-    cloth.positions.forEach((p, i) => {
-      if (!cloth.topology.fixed.has(i)) {
-        assert.ok(p.distanceTo(b.collider.position) >= .57 - 1e-6,
-          `vertex ${i} lost native collision after another solver was destroyed`);
-      }
-    });
-  };
-  for (let cycle = 0; cycle < 3; cycle++) {
-    for (let frame = 0; frame < 8; frame++) {
-      second.beforeAnimation(); b.collider.position.x = .12 + .1 * Math.sin(frame);
-      b.root.updateMatrixWorld(true); second.update(1 / 60); checkContacts();
-    }
-    second.destroy();
-    if (cycle < 2) second = await b.create();
-  }
-});
-
-test("stepping or warming one cloth does not advance another cloth's simulation clock", async () => {
-  const run = async (withOther) => {
-    const f = fixture();
-    f.cloth.gravity = [0, -2, 0];
-    const sim = await f.create();
-    sim.beforeAnimation(); sim.update(1 / 60);
-    let other;
-    if (withOther) {
-      const g = fixture();
-      other = await g.create();
-      for (let i = 0; i < 20; i++) {
-        other.beforeAnimation(); other.update(1 / 60);
-      }
-      other.reset(); other.beforeAnimation(); other.update(0);
-    }
-    for (let i = 0; i < 3; i++) {
-      sim.beforeAnimation(); sim.update(1 / 60);
-    }
-    const positions = sim.records[0].positions.map((p) => p.clone());
-    other?.destroy(); sim.destroy();
-    return positions;
-  };
-  const alone = await run(false), besideAnother = await run(true);
-  alone.forEach((p, i) => assert.ok(p.distanceTo(besideAnother[i]) < 1e-6,
-    `vertex ${i}: unrelated cloth steps changed the simulation clock`));
-});
-
-test("cached skin palettes match Three for blended animated bones and Morphs", async () => {
-  const f = fixture(), second = new THREE.Bone();
-  f.root.add(second); second.position.y = .3; f.root.updateMatrixWorld(true);
-  f.mesh.bind(new THREE.Skeleton([f.bone, second]));
-  const joints = f.geometry.getAttribute("skinIndex"), weights = f.geometry.getAttribute("skinWeight");
-  for (let i = 0; i < weights.count; i += 1) {
-    joints.setXY(i, 0, 1); weights.setXY(i, .25, .75);
-  }
-  const delta = new Float32Array(weights.count * 3);
-  for (let i = 0; i < weights.count; i += 1) delta[i * 3 + 2] = .12;
-  f.geometry.morphAttributes.position = [new THREE.BufferAttribute(delta, 3)];
-  f.geometry.morphTargetsRelative = true; f.mesh.updateMorphTargets(); f.mesh.morphTargetInfluences[0] = .4;
-  f.physics.colliders = []; f.cloth.colliders = [];
-  f.cloth.fixed = Array.from({ length: weights.count }, (_, i) => i);
-  const sim = await f.create();
-  for (let frame = 0; frame < 10; frame += 1) {
-    sim.beforeAnimation(); second.rotation.z = frame * .025; f.bone.position.x = frame * .01;
-    f.root.scale.set(1.1, .9, 1.2); f.root.updateMatrixWorld(true);
-    const expected = Array.from({ length: weights.count }, (_, i) => f.mesh.getVertexPosition(i, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld));
-    sim.update(1 / 60);
-    expected.forEach((p, i) => assert.ok(p.distanceTo(sim.records[0].targets[i]) < 1e-6));
-  }
-  assert.equal(sim.records[0].skinBindings.length, 1);
-  sim.destroy();
-});
-
-test("skin palette cache ignores unused vertices with empty bindings", async () => {
+test("non-finite animation is rejected before it reaches the geometry", async () => {
   const f = fixture();
-  f.geometry.setIndex([0, 1, 5]); f.cloth.fixed = [0];
-  f.geometry.getAttribute("skinWeight").setXYZW(24, 0, 0, 0, 0);
-  const sim = await f.create(); sim.beforeAnimation(); sim.update(1 / 60);
-  assert.equal(sim.records[0].inverseSkin[24], undefined);
-  assert.ok(sim.records[0].positions.every((p) => p.toArray().every(Number.isFinite)));
-  sim.destroy();
+  const sim = await f.create();
+  try {
+    run(f, sim, 2);
+    f.bone.position.x = NaN; f.root.updateMatrixWorld(true);
+    assert.throws(() => sim.update(STEP), /非有限|不可逆/);
+  } finally { sim.destroy(); }
 });
 
-// Allocation-heavy reference of the original writeback. Keep the arithmetic
-// order independent of the production scratch objects to catch aliasing.
-function referenceWriteback(cloth) {
-  const positions = cloth.solver.positions.map((p, i) => cloth.topology.fixed.has(i)
-    ? cloth.targets[i].clone() : p.clone().add(cloth.targets[i]).sub(cloth.previousTargets[i]));
-  const normals = positions.map(() => new THREE.Vector3());
-  const edgeA = new THREE.Vector3(), edgeB = new THREE.Vector3();
-  for (let i = 0; i < cloth.topology.indices.length; i += 3) {
-    const [a, b, c] = cloth.topology.indices.slice(i, i + 3);
-    edgeA.subVectors(positions[b], positions[a]); edgeB.subVectors(positions[c], positions[a]);
-    edgeA.cross(edgeB);
-    normals[a].add(edgeA); normals[b].add(edgeA); normals[c].add(edgeA);
-  }
-  const position = cloth.sourcePosition.clone(), normal = cloth.sourceNormal.clone();
-  const p = new THREE.Vector3(), n = new THREE.Vector3(), morph = new THREE.Vector3();
-  const normalInverse = new THREE.Matrix3();
+test("a limb thinner than the particle spacing pushes the fabric instead of threading between particles", async () => {
+  // Every vertex is its own particle, 0.5 m apart; a thin horizontal limb
+  // sweeps through between two rows, touching no particle.
+  const f = fixture({ segments: 4, colliders: [{ shape: "capsule", node: 1, offset: [-.12, 0, 0], radius: .04, tail: { node: 1, offset: [.12, 0, 0] } }] });
+  f.cloth.proxy = { vertices: Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i) };
+  f.collider.position.set(0, -.25, -.3);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60, (i) => f.collider.position.set(0, -.25, -.3 + Math.min(1, i / 30) * .4));
+    // The edge between the particles above and below the limb's path must
+    // have been carried in front of it, not left behind it.
+    const x = sim.records[0].solver.positions, a = vertexAt(f, 0, 0), b = vertexAt(f, 0, -.5);
+    const middle = (x[a * 3 + 2] + x[b * 3 + 2]) / 2;
+    assert.ok(middle > .1 + .04, `the fabric between two particles is ${((.14 - middle) * 1000).toFixed(0)} mm short of clearing the limb`);
+  } finally { sim.destroy(); }
+});
+
+test("cloth authored across a thin limb stays as authored at rest", async () => {
+  // A belt pendant draped over the hips: in the starting pose the fabric
+  // between two particles already runs through a thin collider.
+  const f = fixture({ segments: 4, colliders: [{ shape: "capsule", node: 1, offset: [-.12, 0, 0], radius: .04, tail: { node: 1, offset: [.12, 0, 0] } }] });
+  f.cloth.proxy = { vertices: Array.from({ length: f.geometry.getAttribute("position").count }, (_, i) => i) };
+  // The fabric cuts through the front of the limb, 1 cm behind it.
+  f.collider.position.set(0, -.25, -.01);
+  const sim = await f.create();
+  try {
+    run(f, sim, 60);
+    const rest = sim.records[0].restPosition;
+    let worst = 0;
+    for (const i of moving(f)) worst = Math.max(worst, world(f.mesh, i).distanceTo(new THREE.Vector3().fromArray(rest, i * 3)));
+    assert.ok(worst < 1e-3, `the cloth moved ${(worst * 1000).toFixed(1)} mm away from its authored pose`);
+  } finally { sim.destroy(); }
+});
+
+test("a seam fixed on only one of its vertex copies stays put on every copy", async () => {
+  // Non-indexed: every position has a copy per triangle, as at UV seams. The
+  // configuration lists only the first copy of each top-row position.
+  const geometry = new THREE.PlaneGeometry(2, 2, 8, 8).toNonIndexed();
+  const f = fixture({ extra: geometry });
+  const position = geometry.getAttribute("position"), seen = new Set();
+  f.cloth.fixed = [];
   for (let i = 0; i < position.count; i++) {
-    const index = cloth.topology.mapping[i];
-    if (index < 0) continue;
-    const base = morphTerms(cloth.mesh, i, "position", morph);
-    p.copy(positions[index]).applyMatrix4(cloth.inverseWorld).applyMatrix4(cloth.inverseSkin[i]).sub(morph).divideScalar(base);
-    position.setXYZ(i, p.x, p.y, p.z);
-    normalInverse.setFromMatrix4(cloth.inverseSkin[i]);
-    n.copy(normals[index]);
-    if (n.lengthSq() > 1e-20) {
-      n.normalize().applyMatrix3(cloth.normalToLocal).applyMatrix3(normalInverse).normalize();
-      const normalBase = morphTerms(cloth.mesh, i, "normal", morph);
-      n.sub(morph).divideScalar(normalBase);
-    } else n.fromBufferAttribute(cloth.sourceNormal, i);
-    normal.setXYZ(i, n.x, n.y, n.z);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", position); geometry.setAttribute("normal", normal);
-  geometry.morphAttributes = cloth.geometry.morphAttributes;
-  geometry.morphTargetsRelative = cloth.geometry.morphTargetsRelative;
-  geometry.computeBoundingBox(); geometry.computeBoundingSphere();
-  return geometry;
-}
-
-test("cloth writeback matches the original arithmetic with animated bones and non-endpoint Morphs", async () => {
-  for (const relative of [true, false]) {
-    const f = fixture(), second = new THREE.Bone();
-    f.root.add(second); second.position.y = .23; f.root.updateMatrixWorld(true);
-    f.mesh.bind(new THREE.Skeleton([f.bone, second]));
-    const joints = f.geometry.getAttribute("skinIndex"), weights = f.geometry.getAttribute("skinWeight");
-    for (let i = 0; i < weights.count; i++) {
-      const weight = i % 2 ? .28125 : .625;
-      joints.setXY(i, 0, 1); weights.setXY(i, weight, 1 - weight);
-    }
-    for (const attribute of ["position", "normal"]) {
-      const source = f.geometry.getAttribute(attribute), morph = source.clone();
-      for (let i = 0; i < source.count; i++) {
-        morph.setXYZ(i, (relative ? 0 : source.getX(i)) + .013 * Math.sin(i),
-          (relative ? 0 : source.getY(i)) + .017 * Math.cos(i),
-          (relative ? 0 : source.getZ(i)) + .021);
-      }
-      f.geometry.morphAttributes[attribute] = [morph];
-    }
-    f.geometry.morphTargetsRelative = relative; f.mesh.updateMorphTargets();
-    f.mesh.morphTargetInfluences[0] = .17;
-    let paletteUpdates = 0;
-    const originalUpdate = f.mesh.skeleton.update.bind(f.mesh.skeleton);
-    f.mesh.skeleton.update = () => { paletteUpdates++; originalUpdate(); };
-    const sim = await f.create();
-    try {
-      for (let frame = 0; frame < 12; frame++) {
-        sim.beforeAnimation();
-        f.bone.position.x = .011 * frame; second.rotation.set(.019 * frame, -.013 * frame, .023 * frame);
-        f.root.rotation.y = .031 * frame; f.root.scale.set(1.13, .91, 1.07);
-        f.mesh.morphTargetInfluences[0] = [.17, .63, .41][frame % 3];
-        f.root.updateMatrixWorld(true);
-        const targets = Array.from({ length: weights.count }, (_, i) => f.mesh.getVertexPosition(i, new THREE.Vector3()).applyMatrix4(f.mesh.matrixWorld));
-        sim.update([1 / 120, 1 / 60, 1 / 30][frame % 3]);
-        const cloth = sim.records[0], expected = referenceWriteback(cloth);
-        targets.forEach((p, i) => assert.ok(p.distanceTo(cloth.targets[i]) < 1e-12));
-        assert.deepEqual(cloth.position.array, expected.getAttribute("position").array);
-        assert.deepEqual(cloth.normal.array, expected.getAttribute("normal").array);
-        assert.deepEqual(cloth.geometry.boundingBox, expected.boundingBox);
-        assert.deepEqual(cloth.geometry.boundingSphere, expected.boundingSphere);
-        expected.dispose();
-      }
-      assert.equal(paletteUpdates, 0, "CPU cloth must not regenerate the unused GPU bone palette");
-    } finally { sim.destroy(); }
-  }
-});
-
-test("cloth writeback still rejects each non-finite coordinate before writing geometry", async () => {
-  const f = fixture(), sim = await f.create();
-  try {
-    sim.beforeAnimation(); sim.update(0);
-    const cloth = sim.records[0], point = cloth.solver.positions[17], original = point.clone();
-    const before = cloth.position.array.slice();
-    for (const coordinate of ["x", "y", "z"]) {
-      for (const invalid of [NaN, Infinity, -Infinity]) {
-        point.copy(original); point[coordinate] = invalid;
-        assert.throws(() => cloth.writeGeometry(), /cloth 求解产生非有限坐标/);
-        assert.deepEqual(cloth.position.array, before);
-      }
-    }
-    point.copy(original);
-  } finally { sim.destroy(); }
-});
-
-test("cloth samples only nonzero bones referenced by its primitive", async () => {
-  const f = fixture(), unused = new THREE.Bone(), zeroWeight = new THREE.Bone();
-  f.root.add(unused, zeroWeight); f.root.updateMatrixWorld(true);
-  f.mesh.bind(new THREE.Skeleton([f.bone, unused, zeroWeight]));
-  f.geometry.setIndex([0, 1, 5]); f.cloth.fixed = [0];
-  f.physics.colliders = []; f.cloth.colliders = [];
-  const joints = f.geometry.getAttribute("skinIndex");
-  for (let i = 0; i < joints.count; i++) joints.setXYZW(i, 0, 2, 2, 2);
-  joints.setX(24, 1); // Positive weight, but outside this primitive.
-  for (const bone of [unused, zeroWeight]) {
-    Object.defineProperty(bone, "matrixWorld", { get() { throw new Error("unused bone matrix read"); } });
+    const key = `${position.getX(i)},${position.getY(i)}`;
+    if (position.getY(i) > 1 - 1e-6 && !seen.has(key)) { seen.add(key); f.cloth.fixed.push(i); }
   }
   const sim = await f.create();
   try {
-    const cloth = sim.records[0];
-    assert.deepEqual(cloth.skinBoneIndices, [0]);
-    for (const index of [1, 2]) {
-      cloth.skinPalette[index].multiplyMatrices = () => { throw new Error("unused palette computed"); };
+    run(f, sim, 30, () => { f.bone.position.x = .05; });
+    const rest = sim.records[0].restPosition;
+    for (let i = 0; i < position.count; i++) {
+      const expected = new THREE.Vector3().fromArray(rest, i * 3).add(new THREE.Vector3(.05, 0, 0));
+      const error = world(f.mesh, i).distanceTo(expected);
+      assert.ok(error < 1e-4, `vertex ${i} at ${position.getX(i).toFixed(2)},${position.getY(i).toFixed(2)} is ${(error * 1000).toFixed(1)} mm off`);
     }
-    const originalTarget = cloth.targets[0].clone();
-    f.bone.position.x = .37; f.bone.updateWorldMatrix(true, false);
-    sim.beforeAnimation(); sim.update(1 / 60);
-    assert.ok(Math.abs(cloth.targets[0].x - originalTarget.x - .37) < 1e-12);
   } finally { sim.destroy(); }
 });
 
-// Full-skeleton reference deliberately computes every bone, then derives
-// per-vertex skin matrices independently of the optimized binding cache.
-function fullPaletteReference(cloth) {
-  const mesh = cloth.mesh;
-  const palette = mesh.skeleton.bones.map((bone, i) => new THREE.Matrix4()
-    .multiplyMatrices(bone.matrixWorld, mesh.skeleton.boneInverses[i]));
-  const matrices = cloth.vertexBindings.map((binding, i) => binding
-    ? vertexSkinMatrix(mesh, i, new THREE.Matrix4(), palette) : null);
-  const morph = new THREE.Vector3();
-  const targets = cloth.topology.vertices.map(index => {
-    const base = morphTerms(mesh, index, "position", morph);
-    return new THREE.Vector3().fromBufferAttribute(cloth.sourcePosition, index)
-      .multiplyScalar(base).add(morph).applyMatrix4(matrices[index]).applyMatrix4(mesh.matrixWorld);
-  });
-  return { ...cloth, targets, inverseSkin: matrices.map(matrix => matrix?.invert()) };
+test("explicit proxy groups are kept apart even for coincident vertices", async () => {
+  // Two copies of one position assigned to different source groups (as a
+  // converter may when a vertex sits on a group boundary): both groups stay.
+  const geometry = new THREE.PlaneGeometry(2, 2, 8, 8).toNonIndexed();
+  const f = fixture({ extra: geometry });
+  const position = geometry.getAttribute("position");
+  const block = (i) => Math.min(1, Math.floor((position.getX(i) + 1) / 1)) + 2 * Math.min(1, Math.floor((1 - position.getY(i)) / 1));
+  const groups = Array.from({ length: position.count }, (_, i) => block(i));
+  // A copy at the centre column, mid height, joins the neighbouring block.
+  const copies = [];
+  for (let i = 0; i < position.count; i++) if (Math.abs(position.getX(i)) < 1e-6 && Math.abs(position.getY(i) + .5) < 1e-6) copies.push(i);
+  assert.ok(copies.length >= 2);
+  const other = groups[copies[0]] ^ 1;
+  groups[copies[1]] = other;
+  f.cloth.proxy = { vertices: groups };
+  const sim = await f.create();
+  try {
+    const { renderCluster } = sim.records[0].proxy;
+    assert.notEqual(renderCluster[copies[0]], renderCluster[copies[1]], "the two source groups were merged");
+    run(f, sim, 10);
+    const rest = sim.records[0].restPosition;
+    for (const i of copies) assert.ok(world(f.mesh, i).distanceTo(new THREE.Vector3().fromArray(rest, i * 3)) < 1e-4, `copy ${i} left its rest pose`);
+  } finally { sim.destroy(); }
+});
+
+/** A skinned sphere mesh of the given radius following `bone`, as a body part. */
+function bodySphere(root, bone, radius) {
+  const geometry = new THREE.SphereGeometry(radius, 48, 24);
+  const count = geometry.getAttribute("position").count;
+  geometry.setAttribute("skinIndex", new THREE.BufferAttribute(new Uint16Array(count * 4), 4));
+  const weights = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) weights[i * 4] = 1;
+  geometry.setAttribute("skinWeight", new THREE.BufferAttribute(weights, 4));
+  const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial());
+  root.add(mesh); root.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton([bone]));
+  return mesh;
 }
 
-test("referenced-bone sampling exactly matches full palettes with animated bindings and Morphs", async () => {
-  for (const relative of [true, false]) {
-    const f = fixture(), bones = [f.bone, new THREE.Bone(), new THREE.Bone(), new THREE.Bone()];
-    f.root.add(...bones.slice(1));
-    bones[1].position.set(.12, -.07, .23); bones[3].position.set(-.2, .15, .05);
-    f.root.position.set(.31, -.13, .17); f.root.rotation.set(.1, .2, -.07);
-    f.mesh.position.set(.19, -.23, .11); f.mesh.rotation.set(.17, -.11, .09); f.mesh.scale.set(.93, 1.07, 1.13);
-    f.root.updateMatrixWorld(true);
-    const bind = new THREE.Matrix4().compose(new THREE.Vector3(.21, -.14, .08),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(.13, -.18, .27)), new THREE.Vector3(1.1, .92, 1.04));
-    f.mesh.bind(new THREE.Skeleton(bones), bind); f.mesh.bindMode = THREE.DetachedBindMode;
-    const joints = f.geometry.getAttribute("skinIndex"), weights = f.geometry.getAttribute("skinWeight");
-    for (let i = 0; i < joints.count; i++) {
-      // Binding order is deliberately opposite to the skeleton index order;
-      // duplicate positive influences and zero-weight slots are both covered.
-      joints.setXYZW(i, 3, 1, 2, 3);
-      weights.setXYZW(i, i % 2 ? .25 : .5, i % 2 ? .625 : .5, 0, i % 2 ? .125 : 0);
-    }
-    for (const attribute of ["position", "normal"]) {
-      const base = f.geometry.getAttribute(attribute), morph = base.clone();
-      for (let i = 0; i < base.count; i++) morph.setXYZ(i,
-        (relative ? 0 : base.getX(i)) + .013 * Math.sin(i),
-        (relative ? 0 : base.getY(i)) + .017 * Math.cos(i),
-        (relative ? 0 : base.getZ(i)) + .021);
-      f.geometry.morphAttributes[attribute] = [morph];
-    }
-    f.geometry.morphTargetsRelative = relative; f.mesh.updateMorphTargets();
-    f.mesh.morphTargetInfluences[0] = .17;
-    f.physics.colliders = []; f.cloth.colliders = [];
-    const sim = await f.create();
-    try {
-      const cloth = sim.records[0], palette = [...cloth.skinPalette];
-      const references = cloth.skinBindings.map(binding => binding.influences.map(influence => influence.elements));
-      assert.deepEqual(cloth.skinBoneIndices, [1, 3]);
-      for (let frame = 0; frame < 9; frame++) {
-        sim.beforeAnimation();
-        bones[1].rotation.set(.019 * frame, -.011 * frame, .023 * frame);
-        bones[3].position.x = -.2 + .017 * frame; bones[3].scale.set(1 + .009 * frame, .97, 1.03);
-        f.root.rotation.y = .2 + .031 * frame; f.root.scale.set(1.13, .91, 1.07);
-        f.mesh.morphTargetInfluences[0] = [.17, .63, .41][frame % 3];
-        f.root.updateMatrixWorld(true); sim.update([1 / 120, 1 / 60, 1 / 30][frame % 3]);
-        const reference = fullPaletteReference(cloth), expected = referenceWriteback(reference);
-        assert.deepEqual(cloth.targets, reference.targets, `target coordinates differ at frame ${frame}`);
-        assert.deepEqual(cloth.position.array, expected.getAttribute("position").array);
-        assert.deepEqual(cloth.normal.array, expected.getAttribute("normal").array);
-        expected.dispose();
-        palette.forEach((matrix, i) => assert.equal(cloth.skinPalette[i], matrix));
-        cloth.skinBindings.forEach((binding, i) => binding.influences.forEach((influence, k) =>
-          assert.equal(influence.elements, references[i][k])));
-      }
-    } finally { sim.destroy(); }
-  }
-});
-
-test("identity bind fast path exactly matches full palettes through dynamic bind and hierarchy changes", async () => {
-  const f = fixture(); f.physics.colliders = []; f.cloth.colliders = [];
-  const sim = await f.create(), cloth = sim.records[0];
-  const parent = new THREE.Group(); f.root.add(parent); parent.add(f.mesh);
-  f.mesh.bindMode = THREE.DetachedBindMode;
-  let products = 0;
-  for (const binding of cloth.skinBindings) {
-    const multiply = binding.matrix.multiplyMatrices;
-    binding.matrix.multiplyMatrices = function(...args) { products++; return multiply.apply(this, args); };
-  }
+test("cloth clears the body mesh where it bulges out of the limb's collider", async () => {
+  // The collider is 2 cm smaller than the skinned body around it.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .15 }] });
+  const bone = new THREE.Bone(); bone.name = "Hips"; f.root.add(bone); f.nodes[1] = bone;
+  bodySphere(f.root, bone, .17);
+  bone.position.set(0, -.3, -.4);
+  const sim = await f.create();
   try {
-    for (let frame = 0; frame < 16; frame++) {
-      parent.position.set(.013 * frame, -.02, .05);
-      parent.rotation.set(.02 * frame, -.01 * frame, .07);
-      parent.scale.set(1.1, .9 + .01 * frame, 1.2);
-      f.bone.rotation.set(.03 * frame, .07, -.01 * frame);
-      f.root.updateMatrixWorld(true);
-      const identity = frame % 2 === 0;
-      if (identity) { f.mesh.bindMatrix.identity(); f.mesh.bindMatrixInverse.identity(); }
-      else {
-        f.mesh.bindMatrix.makeRotationY(.2 + frame * .01).setPosition(.1, -.2, .3);
-        f.mesh.bindMatrixInverse.copy(f.mesh.bindMatrix).invert();
-      }
-      products = 0;
-      cloth.sampleTargets();
-      assert.equal(products, identity ? 0 : 2 * cloth.skinBindings.length);
-      const reference = fullPaletteReference(cloth);
-      assert.deepEqual(cloth.targets, reference.targets, `targets ${frame}`);
-      cloth.vertexBindings.forEach((binding, i) => {
-        if (binding) assert.deepEqual(binding.inverse.elements, reference.inverseSkin[i].elements, `inverse ${frame}/${i}`);
-      });
+    assert.ok(sim.body?.count > 0, "the body around the collider was not picked up");
+    run(f, sim, 90, (i) => bone.position.set(0, -.3, -.4 + Math.min(1, i / 45) * .45));
+    const centre = bone.getWorldPosition(new THREE.Vector3());
+    let touched = false;
+    for (const i of moving(f)) {
+      const distance = world(f.mesh, i).distanceTo(centre);
+      assert.ok(distance > .17, `vertex ${i} is ${((.17 - distance) * 1000).toFixed(1)} mm inside the body`);
+      touched ||= distance < .18;
     }
+    assert.ok(touched, "the body never reached the cloth");
   } finally { sim.destroy(); }
 });
 
-test("identity bind optimization preserves signed-zero and nonfinite multiplication behavior", async () => {
-  const f = fixture(); f.physics.colliders = []; f.cloth.colliders = [];
-  const sim = await f.create(), cloth = sim.records[0];
-  f.mesh.bindMode = THREE.DetachedBindMode;
-  f.bone.matrixWorldAutoUpdate = false;
-  f.mesh.skeleton.boneInverses[0].identity();
-  let products = 0;
-  for (const binding of cloth.skinBindings) {
-    const multiply = binding.matrix.multiplyMatrices;
-    binding.matrix.multiplyMatrices = function(...args) { products++; return multiply.apply(this, args); };
-  }
+test("drawn cloth between sparse probes stays outside the body mesh", async () => {
+  // Source proxies of 1 m x 1 m blocks (81 vertices, 8 of them probes); the
+  // body (2 cm larger than its collider) presses into the middle of the
+  // lower-left block, far from its rim.
+  const f = fixture({ colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .12 }] });
+  const position = f.geometry.getAttribute("position");
+  const block = (i) => (position.getX(i) < 0 ? 0 : 1) + (position.getY(i) < 0 ? 2 : 0);
+  f.cloth.proxy = { vertices: Array.from({ length: position.count }, (_, i) => block(i)) };
+  const bone = new THREE.Bone(); bone.name = "Hips"; f.root.add(bone); f.nodes[1] = bone;
+  bodySphere(f.root, bone, .14);
+  bone.position.set(-.5, -.5, -.3);
+  const sim = await f.create();
   try {
-    for (const mode of ['weighted-negative-zero', 'bind-negative-zero', 'infinity', 'nan']) {
-      f.mesh.bindMatrix.identity(); f.mesh.bindMatrixInverse.identity();
-      f.bone.matrixWorld.identity();
-      if (mode === 'weighted-negative-zero') f.bone.matrixWorld.set(-1,-2,-3,-0, 0,1,0,0, 0,0,1,0, 0,0,0,1);
-      if (mode === 'bind-negative-zero') f.mesh.bindMatrix.elements[1] = -0;
-      if (mode === 'infinity') f.bone.matrixWorld.elements[0] = Infinity;
-      if (mode === 'nan') f.bone.matrixWorld.elements[0] = NaN;
-      products = 0;
-      cloth.sampleTargets();
-      assert.equal(products, 2 * cloth.skinBindings.length, `${mode} must retain the old products`);
-      const reference = fullPaletteReference(cloth);
-      assert.deepEqual(cloth.targets, reference.targets, mode);
-      cloth.vertexBindings.forEach((binding, i) => {
-        if (binding) assert.deepEqual(binding.inverse.elements, reference.inverseSkin[i].elements, `${mode}/${i}`);
-      });
+    assert.ok(sim.body?.count > 0, "the body around the collider was not picked up");
+    // It ends 2 cm in front of the sheet's plane.
+    run(f, sim, 60, (i) => bone.position.set(-.5, -.5, -.3 + Math.min(1, i / 30) * .18));
+    const centre = bone.getWorldPosition(new THREE.Vector3());
+    let touched = false;
+    for (const i of moving(f)) {
+      const distance = world(f.mesh, i).distanceTo(centre);
+      assert.ok(distance > .14 - 1e-3, `vertex ${i} is ${((.14 - distance) * 1000).toFixed(1)} mm inside the body`);
+      touched ||= distance < .15;
     }
+    assert.ok(touched, "the body never reached the cloth");
   } finally { sim.destroy(); }
+});
+
+test("body surface the cloth already covers at load is left to the authored layering", async () => {
+  const { BodySurface } = await import("../src/body-surface.js");
+  const root = new THREE.Group(), bone = new THREE.Bone(); bone.name = "Hips"; root.add(bone);
+  bodySphere(root, bone, .17);
+  // A cloth patch 1 mm in front of the sphere's +Z pole.
+  const cloth = [];
+  for (let x = -.03; x <= .03; x += .005) for (let y = -.03; y <= .03; y += .005) cloth.push(x, y, Math.sqrt(.171 ** 2 - x * x - y * y));
+  const body = BodySurface.create(root, new Set(), () => 0, cloth, new Set(["Hips"]));
+  // Hair or fingers near a capsule are not part of the limb it stands for.
+  assert.equal(BodySurface.create(root, new Set(), () => 0, cloth, new Set(["Head"])), null);
+  assert.ok(body.openCount > 100, "the uncovered body was dropped");
+  const P = body.position;
+  body.update([-1, -1, -1, 1, 1, 1]);
+  let covered = 0;
+  for (let p = 0; p < body.count; p++) {
+    if (body.covered[p]) { covered++; continue; }
+    assert.ok(Math.hypot(P[p * 3], P[p * 3 + 1]) > .02 || P[p * 3 + 2] < 0, `covered point ${p} still collides`);
+  }
+  assert.ok(covered > 0, "nothing was covered");
+  // A cloth point right there is left where it is.
+  const x = [0, 0, .16], before = x.slice();
+  assert.equal(body.collide(x, 0, .003, [0, 0, .16], 0, (reference, r) => r), false);
+  assert.deepEqual(x, before);
+});
+
+test("a lining keeps its depth along the simulated surface where the cloth turns away from the animation", async () => {
+  // Outer sheet with a lining 1 cm behind it; a large sphere tilts the lower
+  // sheet forward, away from its animated (vertical) pose.
+  const outer = new THREE.PlaneGeometry(2, 2, 16, 16), lining = outer.clone().translate(0, 0, -.01);
+  const n = outer.getAttribute("position").count;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([...outer.getAttribute("position").array, ...lining.getAttribute("position").array], 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute([...outer.getAttribute("normal").array, ...outer.getAttribute("normal").array], 3));
+  geometry.setIndex([...outer.index.array, ...Array.from(outer.index.array, (i) => i + n)]);
+  const f = fixture({ extra: geometry, colliders: [{ shape: "sphere", node: 1, offset: [0, 0, 0], radius: .7 }] });
+  f.collider.position.set(0, -1.1, -.9);
+  const sim = await f.create();
+  try {
+    run(f, sim, 90, (i) => f.collider.position.set(0, -1.1, -.9 + Math.min(1, i / 45) * 1.1));
+    const position = f.geometry.getAttribute("position");
+    let turned = 0;
+    for (let v = 0; v < n; v++) {
+      const x = position.getX(v), y = position.getY(v);
+      if (Math.abs(x) > .4 || y > -.2 || y < -.8) continue;
+      const a = world(f.mesh, v), b = world(f.mesh, v + n);
+      const side = world(f.mesh, vertexAt(f, x + .125, y)).sub(world(f.mesh, vertexAt(f, x - .125, y)));
+      const down = world(f.mesh, vertexAt(f, x, y - .125)).sub(world(f.mesh, vertexAt(f, x, y + .125)));
+      const normal = down.cross(side).normalize();
+      turned = Math.max(turned, Math.acos(Math.min(1, normal.z)));
+      const depth = a.clone().sub(b).dot(normal);
+      assert.ok(depth > .006, `lining at ${x.toFixed(2)},${y.toFixed(2)} is ${(depth * 1000).toFixed(1)} mm behind the fabric`);
+    }
+    assert.ok(turned > 1.2, `the cloth only turned ${turned.toFixed(2)} rad`);
+  } finally { sim.destroy(); }
+});
+
+test("cloth pinched in a closed crease stays in it instead of coming out behind the limb", () => {
+  // A thigh folded up against the belly: their colliders overlap and the
+  // skinned front of a skirt lies in both. Pushed out wherever it has drifted
+  // to, the cloth slides round the thigh and comes out on its far side, where
+  // nothing pushes it back.
+  const solver = new ProxyClothSolver({ count: 2, edges: new Uint32Array([0, 1]), bends: new Uint32Array(0),
+    fixed: new Uint8Array([1, 0]), colliderTypes: [COLLIDER.capsule, COLLIDER.capsule], colliderLimbs: new Int8Array([1, 0]) });
+  const colliders = new Float64Array(2 * COLLIDER_STRIDE);
+  colliders.set([-.2, 0, 0, .2, 0, 0, .05, .05]);
+  colliders.set([-.2, 0, .06, .2, 0, .06, .05, .05], COLLIDER_STRIDE);
+  const targets = new Float64Array([0, .3, .04, 0, 0, .03]);
+  // The left thigh (segment 1) is folded against the trunk: its crease is closed.
+  const step = (closedSegments) => solver.step({ targets, normals: null, colliders, radius: new Float64Array([.01, .01]),
+    stiffness: 1, damping: .5, gravity: [0, 0, 0], delta: STEP, closedSegments });
+  solver.reset(targets, colliders);
+  // Squeezed to just behind the thigh's axis.
+  solver.positions.set([0, 0, -.01], 3);
+  for (let i = 0; i < 30; i++) {
+    step(1 << 1);
+    assert.ok(solver.positions[5] > -.03, `step ${i}: the cloth came out behind the thigh (z ${solver.positions[5].toFixed(3)})`);
+  }
+  // With the crease open (a kick) contact stays as it was: cloth on the far
+  // side of a fast limb is not pulled through it.
+  solver.reset(targets, colliders);
+  solver.positions.set([0, 0, -.01], 3);
+  step(0);
+  assert.ok(solver.positions[5] < -.05, "cloth was pulled through an open limb");
 });
