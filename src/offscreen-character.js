@@ -160,7 +160,8 @@ export class OffscreenCharacter {
     if (this.disposed) return;
     await this.character.prepareRenderResources?.();
     if (this.disposed) return;
-    await this.renderer.compileAsync(this.scene, this.camera);
+    if (globalThis.__webgalOfflineExportHost) this.renderer.compile(this.scene, this.camera);
+    else await this.renderer.compileAsync(this.scene, this.camera);
     if (this.disposed) return;
     await prepareSceneTextures(this.renderer, this.scene, { cancelled: () => this.disposed });
     if (this.disposed) return;
@@ -244,6 +245,12 @@ export class OffscreenCharacter {
     this.blink.update(Math.min(elapsed, 0.1) * 1000);
     this.applyHostInputs();
     this.character.update(elapsed);
+    this.character.render();
+  }
+
+  renderCurrentPose() {
+    this.applyHostInputs();
+    this.character.prepareFrame();
     this.character.render();
   }
 

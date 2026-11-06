@@ -58,6 +58,7 @@ export class OffscreenCharacter {
     closingDuration: number; closedDuration: number; openingDuration: number }>): void;
   setMouth(value: number | null): void;
   update(delta: number): void;
+  renderCurrentPose(): void;
   dispose(): void;
 }
 

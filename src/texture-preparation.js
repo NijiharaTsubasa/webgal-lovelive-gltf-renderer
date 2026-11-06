@@ -1,7 +1,11 @@
 const compiledUniforms = new WeakMap();
 const uploadedVersions = new WeakMap();
 
-export const yieldPreparationTask = () => new Promise(resolve => setTimeout(resolve, 16));
+export const yieldPreparationTask = () => new Promise(resolve => {
+  const schedule = globalThis.__webgalOfflineExportHost?.scheduleAssetMount;
+  if (schedule) schedule(resolve);
+  else setTimeout(resolve, 16);
+});
 
 export function registerCompiledUniforms(material, uniforms) {
   let variants = compiledUniforms.get(material);
