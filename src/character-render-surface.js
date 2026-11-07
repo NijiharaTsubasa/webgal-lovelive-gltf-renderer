@@ -4,6 +4,14 @@ import * as THREE from 'three';
 export class CharacterRenderSurface {
   constructor({ width = 768, height = 1024, renderer } = {}) {
     this.renderer = renderer ?? new THREE.WebGLRenderer({ alpha: true, antialias: true, stencil: true });
+    if (globalThis.__webgalOfflineExportHost) {
+      // Runtime profiles also call compileAsync. Their preparation must not
+      // depend on timers belonging to the paused offline animation clock.
+      this.renderer.compileAsync = async (scene, camera, targetScene) => {
+        this.renderer.compile(scene, camera, targetScene);
+        return scene;
+      };
+    }
     this.renderer.debug.checkShaderErrors = import.meta.env?.DEV === true;
     this.renderer.setSize(width, height, false);
     this.renderer.setClearColor(0, 0);

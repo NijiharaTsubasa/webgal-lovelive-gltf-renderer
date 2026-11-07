@@ -5,12 +5,52 @@ import { CharacterRenderSurface, OffscreenCharacter } from '../src/offscreen-cha
 import { CharacterRenderer } from '../src/character-renderer.js';
 import { CharacterResourceOwner } from '../src/character-resource-owner.js';
 
-function fixture() {
+function fixture(overrides = {}) {
   const calls = [];
   const renderer = { debug: {}, domElement: {}, setSize() {}, setClearColor() {},
     dispose() { calls.push('renderer'); }, forceContextLoss() { calls.push('context'); } };
+  Object.assign(renderer, overrides);
   return { calls, surface: new CharacterRenderSurface({ renderer }) };
 }
+
+test('offline render-profile preparation completes while the animation clock is frozen', async () => {
+  const previous = globalThis.__webgalOfflineExportHost;
+  globalThis.__webgalOfflineExportHost = {};
+  try {
+    const scene = {}, camera = {}, target = {}, submitted = [];
+    const { surface } = fixture({
+      compile(...args) { submitted.push(args); return new Set(); },
+      // Three's compileAsync waits on timer callbacks that cannot run while
+      // the offline host is waiting for this preparation to finish.
+      compileAsync() { return new Promise(() => {}); },
+    });
+    const prepared = await Promise.race([
+      (async () => { await surface.renderer.compileAsync(scene, camera, target); return true; })(),
+      new Promise(resolve => setTimeout(() => resolve(false), 30)),
+    ]);
+    assert.equal(prepared, true, 'profile preparation must not wait for animation-clock timers');
+    assert.deepEqual(submitted, [[scene, camera, target]]);
+    assert.equal(await surface.renderer.compileAsync(scene, camera), scene);
+    surface.dispose();
+  } finally {
+    if (previous === undefined) delete globalThis.__webgalOfflineExportHost;
+    else globalThis.__webgalOfflineExportHost = previous;
+  }
+});
+
+test('ordinary playback retains the renderer asynchronous compilation path', async () => {
+  const previous = globalThis.__webgalOfflineExportHost;
+  delete globalThis.__webgalOfflineExportHost;
+  try {
+    const scene = {}, compileAsync = async () => scene;
+    const { surface } = fixture({ compileAsync });
+    assert.equal(surface.renderer.compileAsync, compileAsync);
+    assert.equal(await surface.renderer.compileAsync(), scene);
+    surface.dispose();
+  } finally {
+    if (previous !== undefined) globalThis.__webgalOfflineExportHost = previous;
+  }
+});
 function actor(surface, name) {
   const value = { name, prepared: true, disposed: false,
     dispose() { this.disposed = true; surface.detach(this); } };
