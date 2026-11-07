@@ -57,7 +57,8 @@ export class OffscreenCharacter {
   setBlinkParameters(config: Partial<{ blinkInterval: number; blinkIntervalRandom: number;
     closingDuration: number; closedDuration: number; openingDuration: number }>): void;
   setMouth(value: number | null): void;
-  update(delta: number): void;
+  /** Advance animation and physics; pass false to skip drawing this frame. */
+  update(delta: number, render?: boolean): void;
   renderCurrentPose(): void;
   dispose(): void;
 }

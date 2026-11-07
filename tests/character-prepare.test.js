@@ -244,3 +244,18 @@ test('warm identity separates mesh cloth construction and normalizes the default
     assert.throws(() => new CharacterRenderer({ meshClothEnabled: value }), /meshClothEnabled must be boolean/);
   }
 });
+
+
+test('non-rendering playback retains preparation drawing and its GPU errors', async () => {
+  const calls=[];
+  const actor=offscreenFixture({prepared:true,character:{
+    update(){calls.push('update');},prepareFrame(){calls.push('pose');},
+    render(){calls.push('draw');},
+  },renderer:{getContext:()=>({isContextLost:()=>false}),compileAsync:async()=>calls.push('compile')}});
+  actor.update(.1,false);
+  assert.deepEqual(calls,['update']);
+  await actor.prepare();
+  assert.deepEqual(calls,['update','pose','compile','draw']);
+  actor.character.render=()=>{throw Error('GPU preparation failed');};
+  await assert.rejects(actor.prepare(),/GPU preparation failed/);
+});

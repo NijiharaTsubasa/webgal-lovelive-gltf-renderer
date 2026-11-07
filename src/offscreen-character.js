@@ -237,7 +237,7 @@ export class OffscreenCharacter {
     }
   }
 
-  update(delta) {
+  update(delta, render = true) {
     if (this.disposed) return;
     if (!Number.isFinite(delta)) throw new Error('Character delta must be finite');
     this.surface?.assertDrawable(this);
@@ -245,7 +245,7 @@ export class OffscreenCharacter {
     this.blink.update(Math.min(elapsed, 0.1) * 1000);
     this.applyHostInputs();
     this.character.update(elapsed);
-    this.character.render();
+    if (render) this.character.render();
   }
 
   renderCurrentPose() {

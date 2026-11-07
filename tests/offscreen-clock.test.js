@@ -68,3 +68,13 @@ test('a long interval preserves the blink single-branch transition and discarded
   assert.equal(actor.blink.eyeState, 'Closed');
   assert.equal(actor.blink.closedTimer, 0);
 });
+
+
+test('non-rendering updates preserve animation and host inputs without drawing', () => {
+  const { actor, calls } = actorFixture();
+  actor.update(.1, false);
+  assert.deepEqual(calls, [['blink', 100], ['inputs'], ['animation', .1]]);
+  calls.length = 0;
+  actor.update(.05);
+  assert.deepEqual(calls, [['blink', 50], ['inputs'], ['animation', .05], ['render']]);
+});
