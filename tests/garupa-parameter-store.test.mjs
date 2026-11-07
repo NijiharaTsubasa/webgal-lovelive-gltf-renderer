@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ParameterStore, ParameterPlayer } from '../src/garupa/player.js';
+import * as THREE from 'three';
+import { CharacterRenderer } from '../src/character-renderer.js';
 
 test('parameter storage supports weighted set/add/multiply without clipping source values', () => {
   const store = new ParameterStore({ value: 2 }, { value: { min: -1, max: 1 } });
@@ -62,4 +64,43 @@ test('host queue orchestration preserves baseline, transient controls and scoped
   player.motionQueue.updateParam = () => { throw new Error('queue failure'); };
   assert.throws(() => player.update(.1), /queue failure/);
   assert.equal(sdk.UtSystem.getUserTimeMSec, getter);
+});
+
+test('leaving parameter animation clears its saved face values while retaining expression and host inputs', () => {
+  const player = new ParameterPlayer(runtime(), { defaults: {}, ranges: {} });
+  player.motionQueue.startMotion({ update(store) {
+    store.setParamFloat('PARAM_EYE_L_OPEN', .69);
+    store.setParamFloat('PARAM_EYE_R_SMILE', 1);
+    store.setParamFloat('PARAM_BROW_L_Y', .8);
+    store.setParamFloat('PARAM_MOUTH_FORM_01', -.7);
+  } });
+  player.update(1);
+  assert.equal(player.baseline.PARAM_EYE_L_OPEN, .69);
+  const character = new CharacterRenderer({ renderer: {}, scene: new THREE.Scene(), camera: new THREE.PerspectiveCamera() });
+  character.behaviors = { setMotion() {} };
+  character.parameterPlayer = player;
+  character.pendingMotion = { generation: character.motionGeneration };
+  character.applyPendingMotion();
+  // An empty idle expression cannot overwrite a prior motion's eye values.
+  player.expressionQueue.startMotion({ update() {} });
+  player.update(1);
+  assert.equal(player.parameters.PARAM_EYE_L_OPEN, 1);
+  assert.equal(player.parameters.PARAM_EYE_R_SMILE, 0);
+  assert.equal(player.parameters.PARAM_BROW_L_Y, 0);
+  assert.equal(player.parameters.PARAM_MOUTH_FORM_01, 0);
+  player.expressionQueue.startMotion({ update(store) { store.setParamFloat('PARAM_EYE_L_OPEN', .75); } });
+  player.blink = .2;
+  player.speech = .4;
+  player.update(.1);
+  assert.equal(player.parameters.PARAM_EYE_L_OPEN, .75 * .8);
+  assert.equal(player.parameters.PARAM_MOUTH_OPEN_Y, .4);
+});
+
+test('parameter animation retains saved values between queue samples until explicitly leaving that mode', () => {
+  const player = new ParameterPlayer(runtime(), { defaults: {}, ranges: {} });
+  player.motionQueue.startMotion({ update(store) { store.setParamFloat('PARAM_EYE_L_OPEN', .69); } });
+  player.update(1);
+  player.setMotion('next parameter motion');
+  player.update(.1);
+  assert.equal(player.parameters.PARAM_EYE_L_OPEN, .69);
 });

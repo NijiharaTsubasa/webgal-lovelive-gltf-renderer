@@ -49,6 +49,7 @@ export class ParameterPlayer {
     }
     this.runtime = runtime;
     const { defaults, ranges } = sharedParameters(calibration);
+    this.defaults = defaults;
     this.store = new ParameterStore(defaults, ranges);
     this.baseline = { ...defaults }; this.parameters = { ...defaults };
     this.motionQueue = new runtime.MotionQueueManager();
@@ -86,6 +87,11 @@ export class ParameterPlayer {
     if (json === null) this.expressionQueue.stopAllMotions();
     else this.expressionQueue.startMotion(createWebgalExpression(this.runtime, json));
     });
+  }
+  resetMotionParameters() {
+    // Native animation has no Cubism curves to replace the outgoing motion's
+    // saved parameters. Expressions and host controls still apply on update.
+    this.baseline = { ...this.defaults };
   }
   update(delta) {
     this.time += delta;

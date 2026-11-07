@@ -523,6 +523,7 @@ export class CharacterRenderer {
     this.motion = null;
     this.parameterBody?.restore(); this.parameterBody = null;
     this.parameterPlayer?.setMotion(null);
+    if (change.parameterText === undefined) this.parameterPlayer?.resetMotionParameters();
     this.idlePose?.restore();
     // Initialized cloth already owns its solver; align to the new pose and
     // recover contacts while retaining the bone settling budget.
