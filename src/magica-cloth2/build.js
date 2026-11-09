@@ -29,8 +29,12 @@ const f4 = (q) => [fr(q[0]), fr(q[1]), fr(q[2]), fr(q[3])];
 const sub32 = (a, b) => [fr(a[0] - b[0]), fr(a[1] - b[1]), fr(a[2] - b[2])];
 const dot32 = (a, b) => fr(fr(fr(a[0] * b[0]) + fr(a[1] * b[1])) + fr(a[2] * b[2]));
 const length32 = (a) => fr(Math.sqrt(dot32(a, a)));
-const distance32 = (a, b) => length32(sub32(a, b));
-const distancesq32 = (a, b) => { const d = sub32(a, b); return dot32(d, d); };
+// math.distance / distancesq in float32 (same operation order as length32(sub32(a, b)), without allocations)
+const distancesq32 = (a, b) => {
+  const dx = fr(a[0] - b[0]), dy = fr(a[1] - b[1]), dz = fr(a[2] - b[2]);
+  return fr(fr(fr(dx * dx) + fr(dy * dy)) + fr(dz * dz));
+};
+const distance32 = (a, b) => fr(Math.sqrt(distancesq32(a, b)));
 const FLOAT_MAX = 3.4028234663852886e38;
 
 // DataUtility

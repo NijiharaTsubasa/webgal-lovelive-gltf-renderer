@@ -156,6 +156,69 @@ export class NativeParallelHashMap {
   keyArray() { return Array.from(this.entries(), (e) => e[0]); }
 }
 
+/**
+ * NativeParallelMultiHashMap<int|ushort, *> whose keys are all below the constructor capacity: the bucket array
+ * (>= 2 x capacity, and growing) then holds one key per bucket, so each key's chain is just its values, newest
+ * first, and a rehash reverses every chain.  Same observable orders as NativeParallelHashMap, with one array per
+ * key (values stored oldest first, read backwards).  Growth timing follows the slot allocator: a new value takes a
+ * freed slot if there is one, else the next unused slot, and the capacity doubles when neither is left.
+ */
+export class IntKeyMultiMap {
+  constructor(capacity) {
+    this.keyCapacity = capacity;
+    this.limit = capacity;   // keys below the first capacity always have a bucket of their own
+    this.lists = [];
+    this.allocated = 0;
+    this.freed = 0;
+  }
+
+  list(key) {
+    if (!(key >= 0 && key < this.limit)) throw new Error("IntKeyMultiMap: key outside the bucket range");
+    let l = this.lists[key];
+    if (!l) this.lists[key] = l = [];
+    return l;
+  }
+
+  add(key, value) {
+    if (this.allocated >= this.keyCapacity && this.freed === 0) {   // GrowCapacity + rehash
+      this.keyCapacity = this.keyCapacity === 0 ? 1 : this.keyCapacity * 2;
+      for (const l of this.lists) if (l) l.reverse();
+    }
+    if (this.freed > 0) this.freed--; else this.allocated++;
+    this.list(key).push(value);
+  }
+
+  remove(key) { const l = this.lists[key]; if (l) { this.freed += l.length; l.length = 0; } }
+
+  /** Remove(key) followed by Add(key, v) for each v of values, when values is no longer than the removed list (the
+   *  adds then reuse freed slots: no allocation, no rehash) */
+  replace(key, values) {
+    const l = this.lists[key], old = l ? l.length : 0;
+    if (values.length > old) { this.remove(key); for (const v of values) this.add(key, v); return; }
+    this.freed += old - values.length;
+    this.lists[key] = values;
+  }
+
+  /** MC2RemoveValue: the newest matching value */
+  removeValue(key, value) {
+    const l = this.lists[key];
+    if (!l) return false;
+    for (let i = l.length - 1; i >= 0; i--) if (l[i] === value) { l.splice(i, 1); this.freed++; return true; }
+    return false;
+  }
+
+  countValuesForKey(key) { return this.lists[key]?.length ?? 0; }
+  containsKey(key) { return this.countValuesForKey(key) > 0; }
+  containsPair(key, value) { const l = this.lists[key]; return !!l && l.includes(value); }
+  uniqueAdd(key, value) { if (!this.containsPair(key, value)) this.add(key, value); }
+
+  /** GetValuesForKey order, as a fresh array */
+  valuesArray(key) { const l = this.lists[key]; return l ? l.slice().reverse() : []; }
+
+  /** GetValuesForKey order without copying; the key's list must not change during the walk */
+  forEachValue(key, fn) { const l = this.lists[key]; if (l) for (let i = l.length - 1; i >= 0; i--) fn(l[i]); }
+}
+
 /** MultiDataBuilder<T>.ToNativeArray: per index, GetValuesForKey order; index = Pack12_20(count, start) */
 export function multiDataToArrays(map, indexCount) {
   const index = new Uint32Array(indexCount), data = [];

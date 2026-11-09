@@ -13,7 +13,7 @@
 // Input: the original Unity mesh of each renderer (converter "meshData"), not the GLB mesh.
 import * as M from "./math.js";
 import {
-  NativeParallelHashMap, hashInt, hashInt2Key, hashInt3Key, int2Key, int2X, int2Y, int3Of, unitySort,
+  NativeParallelHashMap, IntKeyMultiMap, hashInt, hashInt2Key, hashInt3Key, int2Key, int2X, int2Y, int3Of, unitySort,
 } from "./native-hash.js";
 import {
   FIXED, isDontMove, isInvalid, MINIMUM_GRID_SIZE, FLOAT_MAX,
@@ -127,20 +127,96 @@ function importRenderMesh(hierarchy, rendererRef, mesh) {
 }
 
 // ----------------------------------------------------------------------------------- SelectionMesh
-const gridOf = (p, gridSize) => p.map((x) => Math.floor(fr(x / gridSize)));
-function* gridArea(p, radius, gridSize) {   // GridMap.GetArea: x fastest, then y, then z
-  const lo = gridOf(p.map((x) => fr(x - radius)), gridSize), hi = gridOf(p.map((x) => fr(x + radius)), gridSize);
-  for (let z = Math.min(lo[2], hi[2]); z <= Math.max(lo[2], hi[2]); z++) {
-    for (let y = Math.min(lo[1], hi[1]); y <= Math.max(lo[1], hi[1]); y++) {
-      for (let x = Math.min(lo[0], hi[0]); x <= Math.max(lo[0], hi[0]); x++) yield `${x},${y},${z}`;
+// GridMap<int> (NativeParallelMultiHashMap<int3,int>) filled once and then queried; it never grows or removes, so
+// each cell lists its values newest first.  Cells are indexed relative to the filled range: a dense table when the
+// range is small, otherwise a Map with compact integer keys.
+const GRID_DENSE_CELLS = 1 << 16;
+class Grid {
+  /** values[i] is stored in the cell of points[i], in this insertion order */
+  constructor(gridSize, values, points) {
+    this.gridSize = gridSize;
+    const n = values.length, cx = new Float64Array(n), cy = new Float64Array(n), cz = new Float64Array(n);
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const p = points[i];
+      const x = cx[i] = this.cell(p[0]), y = cy[i] = this.cell(p[1]), z = cz[i] = this.cell(p[2]);
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    this.empty = n === 0;
+    if (this.empty) return;
+    Object.assign(this, { x0, y0, z0, x1, y1, z1, ny: y1 - y0 + 1, nz: z1 - z0 + 1 });
+    const total = (x1 - x0 + 1) * this.ny * this.nz;
+    const key = (i) => ((cx[i] - x0) * this.ny + (cy[i] - y0)) * this.nz + (cz[i] - z0);
+    if (total <= GRID_DENSE_CELLS) {
+      const start = new Int32Array(total + 1), order = new Int32Array(n);
+      for (let i = 0; i < n; i++) start[key(i) + 1]++;
+      for (let k = 0; k < total; k++) start[k + 1] += start[k];
+      const cursor = start.slice(0, total);
+      for (let i = 0; i < n; i++) order[cursor[key(i)]++] = values[i];
+      this.start = start;
+      this.order = order;
+    } else {
+      this.cells = new Map();
+      for (let i = 0; i < n; i++) {
+        const k = key(i), c = this.cells.get(k);
+        if (c) c.push(values[i]); else this.cells.set(k, [values[i]]);
+      }
     }
   }
-}
-// GridMap<int> that never grows and never removes: per cell, newest entry first
-class Grid {
-  constructor(gridSize) { this.gridSize = gridSize; this.cells = new Map(); }
-  add(p, i) { const k = gridOf(p, this.gridSize).join(","); let c = this.cells.get(k); if (!c) this.cells.set(k, c = []); c.unshift(i); }
-  get(k) { return this.cells.get(k); }
+  cell(x) { return Math.floor(fr(x / this.gridSize)); }   // GridMap.GetGrid
+  /** forArea's values, in its order, into this.buffer; returns how many */
+  gather(p, radius) {
+    if (this.empty) return 0;
+    const buf = this.buffer ??= new Int32Array(this.order ? this.order.length : [...this.cells.values()].reduce((a, c) => a + c.length, 0));
+    let n = 0;
+    const ax = this.cell(fr(p[0] - radius)), bx = this.cell(fr(p[0] + radius));
+    const ay = this.cell(fr(p[1] - radius)), by = this.cell(fr(p[1] + radius));
+    const az = this.cell(fr(p[2] - radius)), bz = this.cell(fr(p[2] + radius));
+    const xa = Math.max(Math.min(ax, bx), this.x0), xb = Math.min(Math.max(ax, bx), this.x1);
+    const ya = Math.max(Math.min(ay, by), this.y0), yb = Math.min(Math.max(ay, by), this.y1);
+    const za = Math.max(Math.min(az, bz), this.z0), zb = Math.min(Math.max(az, bz), this.z1);
+    const { ny, nz, start, order, cells } = this;
+    for (let z = za; z <= zb; z++) {
+      for (let y = ya; y <= yb; y++) {
+        for (let x = xa; x <= xb; x++) {
+          const k = ((x - this.x0) * ny + (y - this.y0)) * nz + (z - this.z0);
+          if (start) {
+            for (let j = start[k + 1] - 1; j >= start[k]; j--) buf[n++] = order[j];
+          } else {
+            const c = cells.get(k);
+            if (c) for (let j = c.length - 1; j >= 0; j--) buf[n++] = c[j];
+          }
+        }
+      }
+    }
+    return n;
+  }
+  /** GridMap.GetArea(p, radius) (x fastest, then y, then z) with each cell's values newest first; fn(value)
+   *  returning true stops the walk (and forArea returns true). */
+  forArea(p, radius, fn) {
+    if (this.empty) return false;
+    const ax = this.cell(fr(p[0] - radius)), bx = this.cell(fr(p[0] + radius));
+    const ay = this.cell(fr(p[1] - radius)), by = this.cell(fr(p[1] + radius));
+    const az = this.cell(fr(p[2] - radius)), bz = this.cell(fr(p[2] + radius));
+    const xa = Math.max(Math.min(ax, bx), this.x0), xb = Math.min(Math.max(ax, bx), this.x1);
+    const ya = Math.max(Math.min(ay, by), this.y0), yb = Math.min(Math.max(ay, by), this.y1);
+    const za = Math.max(Math.min(az, bz), this.z0), zb = Math.min(Math.max(az, bz), this.z1);
+    const { ny, nz, start, order, cells } = this;
+    for (let z = za; z <= zb; z++) {
+      for (let y = ya; y <= yb; y++) {
+        for (let x = xa; x <= xb; x++) {
+          const k = ((x - this.x0) * ny + (y - this.y0)) * nz + (z - this.z0);
+          if (start) {
+            for (let j = start[k + 1] - 1; j >= start[k]; j--) if (fn(order[j])) return true;
+          } else {
+            const c = cells.get(k);
+            if (c) for (let j = c.length - 1; j >= 0; j--) if (fn(c[j])) return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
 }
 
 function selectionMesh(vm, selection, selectionLocalToWorld, mergin) {
@@ -150,14 +226,13 @@ function selectionMesh(vm, selection, selectionLocalToWorld, mergin) {
     const toM = M.m4mul(vm.initWorldToLocal, selectionLocalToWorld);
     positions = positions.map((p) => f3(M.m4point(toM, p)));
   }
-  const grid = new Grid(mergin);
-  positions.forEach((p, i) => { if (!isInvalid(selection.attributes[i])) grid.add(p, i); });
+  const used = [];
+  positions.forEach((p, i) => { if (!isInvalid(selection.attributes[i])) used.push(i); });
+  const grid = new Grid(mergin, used, used.map((i) => positions[i]));
   const n = vm.vcnt, remap = new Int32Array(n).fill(-1);
   for (let v = 0; v < n; v++) {
     const p = vm.localPositions[v];
-    search: for (const k of gridArea(p, mergin, mergin)) {
-      for (const s of grid.get(k) ?? []) if (distance32(p, positions[s]) <= mergin) { remap[v] = 1; break search; }
-    }
+    if (grid.forArea(p, mergin, (s) => distance32(p, positions[s]) <= mergin)) remap[v] = 1;
   }
   const tris = vm.triangles.filter((t) => remap[t[0]] >= 0 || remap[t[1]] >= 0 || remap[t[2]] >= 0);
   for (const t of tris) { remap[t[0]] = 1; remap[t[1]] = 1; remap[t[2]] = 1; }
@@ -268,7 +343,7 @@ class Reduction {
     this.trace = trace;
     const V = mesh.vcnt;
     this.join = new Int32Array(V).fill(-1);
-    this.vv = new NativeParallelHashMap(V, hashInt, true);
+    this.vv = new IntKeyMultiMap(V);
     for (const [x, y, z] of mesh.triangles) {
       this.vv.add(x, y); this.vv.add(x, z); this.vv.add(y, x); this.vv.add(y, z); this.vv.add(z, x); this.vv.add(z, y);
     }
@@ -284,14 +359,11 @@ class Reduction {
     for (let v = 0; v < V; v++) {   // UpdateLinkIndexJob
       if (join[v] >= 0) continue;
       const set = [];
-      for (const i of vv.valuesForKey(v)) {
-        let t = i;
-        if (join[t] >= 0) t = join[t];
-        if (t === v) continue;
-        setAdd(set, t);
-      }
-      vv.remove(v);
-      for (const t of set) vv.add(v, t);
+      vv.forEachValue(v, (i) => {
+        const t = join[i] >= 0 ? join[i] : i;
+        if (t !== v) setAdd(set, t);
+      });
+      vv.replace(v, set);
     }
   }
 
@@ -307,15 +379,15 @@ class Reduction {
   sameDistance(mergeLength) {
     const m = this.mesh, V = m.vcnt, { join, vv } = this;
     mergeLength = Math.max(mergeLength, 1e-9);
-    const grid = new Grid(fr(mergeLength * 2));
-    for (let v = 0; v < V; v++) if (join[v] < 0) grid.add(m.localPositions[v], v);
-    const pairs = new NativeParallelHashMap(V, hashInt, true);
+    const live = [];
+    for (let v = 0; v < V; v++) if (join[v] < 0) live.push(v);
+    const grid = new Grid(fr(mergeLength * 2), live, live.map((v) => m.localPositions[v]));
+    const pairs = new IntKeyMultiMap(V);
     for (let v = 0; v < V; v++) {
       if (join[v] >= 0) continue;
       const p = m.localPositions[v];
-      for (const k of gridArea(p, mergeLength, grid.gridSize)) {
-        for (const t of grid.get(k) ?? []) if (t !== v && distance32(p, m.localPositions[t]) <= mergeLength) pairs.add(v, t);
-      }
+      const cnt = grid.gather(p, mergeLength), buf = grid.buffer;
+      for (let j = 0; j < cnt; j++) { const t = buf[j]; if (t !== v && distance32(p, m.localPositions[t]) <= mergeLength) pairs.add(v, t); }
     }
     let cnt = 0;
     for (let live = 0; live < V; live++) {   // JoinJob2
@@ -352,18 +424,19 @@ class Reduction {
     const reductionStep = () => {
       const edges = [];
       if (kind === "simple") {
-        const grid = new Grid(fr(now * 2));
-        for (let v = 0; v < V; v++) if (join[v] < 0) grid.add(m.localPositions[v], v);
+        const live = [];
+        for (let v = 0; v < V; v++) if (join[v] < 0) live.push(v);
+        const grid = new Grid(fr(now * 2), live, live.map((v) => m.localPositions[v]));
         for (let v = 0; v < V; v++) {
           if (join[v] >= 0) continue;
           const p = m.localPositions[v], lc = linkCount(v);
-          for (const k of gridArea(p, now, grid.gridSize)) {
-            for (const t of grid.get(k) ?? []) {
-              if (t === v) continue;
-              const d = distance32(p, m.localPositions[t]);
-              if (d > now) continue;
-              edges.push({ x: v, y: t, cost: fr(d * fr(1 + fr(fr(lc + linkCount(t)) / 2))) });
-            }
+          const cnt = grid.gather(p, now), buf = grid.buffer;
+          for (let j = 0; j < cnt; j++) {
+            const t = buf[j];
+            if (t === v) continue;
+            const d = distance32(p, m.localPositions[t]);
+            if (d > now) continue;
+            edges.push({ x: v, y: t, cost: fr(d * fr(1 + fr(fr(lc + linkCount(t)) / 2))) });
           }
         }
       } else {
@@ -402,8 +475,8 @@ class Reduction {
         m.localPositions[v2] = [0, 1, 2].map((k) => fr(pos2[k] + fr(fr(pos1[k] - pos2[k]) * ratio)));
         m.localNormals[v2] = [0, 1, 2].map((k) => fr(m.localNormals[v1][k] + m.localNormals[v2][k]));
         const link = [];
-        for (const n of vv.valuesForKey(v1)) if (n !== v1 && n !== v2) setAdd(link, n);
-        for (const n of vv.valuesForKey(v2)) if (n !== v1 && n !== v2) setAdd(link, n);
+        vv.forEachValue(v1, (n) => { if (n !== v1 && n !== v2) setAdd(link, n); });
+        vv.forEachValue(v2, (n) => { if (n !== v1 && n !== v2) setAdd(link, n); });
         vv.remove(v2);
         for (const n of link) vv.add(v2, n);
         addWeights(m.boneWeights[v2], m.boneWeights[v1]);
@@ -428,8 +501,8 @@ class Reduction {
 // StepReductionBase.CheckJoin2: joining must keep the joined neighbourhood connected (dontMakeLine)
 function checkJoin2(vv, v, t) {
   const link = [];
-  for (const i of vv.valuesForKey(v)) if (i !== v && i !== t) setAdd(link, i);
-  for (const i of vv.valuesForKey(t)) if (i !== v && i !== t) setAdd(link, i);
+  vv.forEachValue(v, (i) => { if (i !== v && i !== t) setAdd(link, i); });
+  vv.forEachValue(t, (i) => { if (i !== v && i !== t) setAdd(link, i); });
   if (link.length === 0) return false;
   const stack = [link[0]];
   while (stack.length) {
@@ -438,12 +511,12 @@ function checkJoin2(vv, v, t) {
     if (at < 0) continue;
     link[at] = link[link.length - 1];   // RemoveAtSwapBack
     link.pop();
-    for (const n of vv.valuesForKey(i)) if (link.includes(n)) stack.push(n);
+    vv.forEachValue(i, (n) => { if (link.includes(n)) stack.push(n); });
   }
   return link.length === 0;
 }
 
-function reduce(proxy, settings, trace) {
+function reduce(proxy, settings, trace, time = () => {}) {
   const box = proxy.boundingBox, ext = M.sub(box.max, box.min), maxSide = Math.max(ext[0], ext[1], ext[2]);
   if (maxSide < 1e-8) throw new Error("MagicaCloth2: reduction of a flat proxy mesh (Reduction_MaxSideLengthZero)");
   const sameDistance = fr(maxSide * REDUCTION_SAME_DISTANCE);
@@ -451,12 +524,15 @@ function reduce(proxy, settings, trace) {
   const shapeDistance = fr(maxSide * M.saturate(settings.shapeDistance ?? 0));
   const r = new Reduction(proxy, trace);
   r.sameDistance(sameDistance);
+  time("reduce.same");
   if (simpleDistance > sameDistance) r.stepReduction("simple", Math.min(fr(sameDistance * 2), simpleDistance), simpleDistance);
   if (shapeDistance > 0 && shapeDistance > simpleDistance) {
     r.stepReduction("shape", Math.min(Math.max(fr(sameDistance * 2), simpleDistance), shapeDistance), shapeDistance);
   }
+  time("reduce.steps");
   organize(proxy, r);
   averageAndMaxVertexDistance(proxy);
+  time("reduce.organize");
 }
 
 // VirtualMesh.Organization + OrganizeStoreVirtualMesh + TransformData.OrganizeReductionTransform
@@ -480,18 +556,18 @@ function organize(mesh, r) {
   const attributes = Uint8Array.from(pick(Array.from(mesh.attributes)));
   const positions = pick(mesh.localPositions), normals = pick(mesh.localNormals), tangents = pick(mesh.localTangents);
   const boneWeights = pick(mesh.boneWeights).map((bw) => ({ w: bw.w.slice(), i: bw.i.map((b, j) => (bw.w[j] > 0 ? useSkin.get(b) : 0)) }));
-  const newVV = new NativeParallelHashMap(newV, hashInt, true);
+  const newVV = new IntKeyMultiMap(newV);
   for (let v = 0; v < oldV; v++) {
     if (join[v] >= 0) continue;
-    for (const o of vv.valuesForKey(v)) newVV.uniqueAdd(remap[v], remap[o]);
+    for (const o of vv.valuesArray(v)) newVV.uniqueAdd(remap[v], remap[o]);
   }
   const edgeSet = new NativeParallelHashMap(newV * 2, hashInt2Key);
-  for (let v = 0; v < newV; v++) for (const v2 of newVV.valuesForKey(v)) edgeSet.add(packInt2(v, v2));
+  for (let v = 0; v < newV; v++) for (const v2 of newVV.valuesArray(v)) edgeSet.add(packInt2(v, v2));
   const triangleSet = new NativeParallelHashMap(newV, hashInt3Key), lines = [];
   for (const [edge] of edgeSet.entries()) {
     const x = int2X(edge), y = int2Y(edge);
     let tcnt = 0;
-    for (const vi of newVV.valuesForKey(x)) {
+    for (const vi of newVV.valuesArray(x)) {
       if (vi === x || vi === y) continue;
       if (newVV.containsPair(y, vi)) {
         const [a, b, c] = packInt3(x, y, vi);
@@ -520,12 +596,24 @@ function organize(mesh, r) {
 }
 
 // ----------------------------------------------------------------------------------- Mapping (direct)
+// ExCostSortedList4.Add (ascending costs, at most four)
+function costListAdd(costs, data, cost, item) {
+  if (costs[3] >= 0 && cost > costs[3]) return;
+  for (let i = 0; i < 4; i++) {
+    if (costs[i] < 0) { costs[i] = cost; data[i] = item; return; }
+    if (cost < costs[i]) { for (let j = 2; j >= i; j--) { costs[j + 1] = costs[j]; data[j + 1] = data[j]; } costs[i] = cost; data[i] = item; return; }
+  }
+}
+
 function mapping(vm, proxy, rendererRef) {
   const same = vm.initLocalToWorld.every((x, i) => x === proxy.initLocalToWorld[i]);
   const toP = same ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] : M.m4mul(proxy.initWorldToLocal, vm.initLocalToWorld);
   const weightLength = fr(proxy.averageVertexDistance * 1.5);
   const pos = proxy.localPositions, vv = proxy.vertexToVertex;
   const attr = new Uint8Array(vm.vcnt), boneWeights = new Array(vm.vcnt);
+  const stamp = new Int32Array(proxy.vcnt);   // NativeParallelHashSet useSet, one generation per render vertex
+  let generation = 0;
+  const stack = [];
   for (let v = 0; v < vm.vcnt; v++) {
     let pindex = proxy.joinIndices[vm.mergeStart + v];
     if (isInvalid(proxy.attributes[pindex])) { attr[v] = 0; boneWeights[v] = vm.boneWeights[v]; continue; }
@@ -533,26 +621,21 @@ function mapping(vm, proxy, rendererRef) {
     const wpos = f3(M.m4point(toP, vm.localPositions[v]));
     // Mapping_CalcDirectWeightJob: proxy vertices within 1.5 x the average edge, reached through the mesh
     const costs = [-1, -1, -1, -1], data = [0, 0, 0, 0];
-    const add = (cost, item) => {   // ExCostSortedList4.Add
-      if (costs[3] >= 0 && cost > costs[3]) return;
-      for (let i = 0; i < 4; i++) {
-        if (costs[i] < 0) { costs[i] = cost; data[i] = item; return; }
-        if (cost < costs[i]) { for (let j = 2; j >= i; j--) { costs[j + 1] = costs[j]; data[j + 1] = data[j]; } costs[i] = cost; data[i] = item; return; }
-      }
-    };
-    const used = new Set(), stack = [pindex];
+    stack.length = 0;
+    stack.push(pindex);
+    generation++;
     while (stack.length) {
       pindex = stack.pop();
-      if (used.has(pindex)) continue;
-      used.add(pindex);
+      if (stamp[pindex] === generation) continue;
+      stamp[pindex] = generation;
       const d = distance32(wpos, pos[pindex]);
       if (d > weightLength) continue;
       const w = fr(Math.pow(M.saturate(fr(1 - fr(d / weightLength))), 3));
-      add(fr(1 - w), pindex);
+      costListAdd(costs, data, fr(1 - w), pindex);
       const pack = vv.index[pindex], cnt = pack >>> 20, s = pack & 0xfffff;
       for (let i = 0; i < cnt && stack.length < 2047; i++) {
         const t = vv.data[s + i];
-        if (used.has(t) || distance32(wpos, pos[t]) > weightLength) continue;
+        if (stamp[t] === generation || distance32(wpos, pos[t]) > weightLength) continue;
         stack.push(t);
       }
     }
@@ -585,7 +668,9 @@ function mapping(vm, proxy, rendererRef) {
  * serializeData2 } of the MagicaCloth component, whose sourceRenderers carry "meshData".
  * -> { proxy, mappings, distance, bending, initLocalGravityDirection, build }
  */
-export function buildMeshCloth(transforms, cloth, params, hierarchy = prefabHierarchy(transforms), { trace = null } = {}) {
+export function buildMeshCloth(transforms, cloth, params, hierarchy = prefabHierarchy(transforms), { trace = null, timings = null } = {}) {
+  let lap = performance.now();
+  const time = (phase) => { if (!timings) return; const now = performance.now(); timings[phase] = (timings[phase] ?? 0) + now - lap; lap = now; };
   const sd = cloth.serializeData, sd2 = cloth.serializeData2 ?? {};
   if (sd.clothType !== 0) throw new Error("MagicaCloth2: not a MeshCloth");
   if ((sd.paintMode ?? 0) !== 0) throw new Error("MagicaCloth2: paint-map selection is not supported");
@@ -616,17 +701,20 @@ export function buildMeshCloth(transforms, cloth, params, hierarchy = prefabHier
       if (id !== null && !hierarchy.has(id)) throw new Error(`MagicaCloth2: skin bone ${id} is missing from the transform table`);
     }
     const vm = importRenderMesh(hierarchy, ref, mesh);
+    time("import");
     // CalcSelectionMergin
     const ext = M.sub(vm.boundingBox.max, vm.boundingBox.min);
     let mergin = fr(Math.max(vm.averageVertexDistance, fr(Math.max(ext[0], ext[1], ext[2]) * maxConnection)) * 1.5);
     mergin = Math.max(mergin, MINIMUM_GRID_SIZE);
     selectionMesh(vm, selection, clothPose.matrix, mergin);
     addMesh(proxy, vm);
+    time("select+merge");
     renderMeshes.push({ vm, ref });
   }
-  reduce(proxy, settings, trace);
+  reduce(proxy, settings, trace, time);
   removeDuplicateTriangles(proxy);
   applySelection(proxy, selection);
+  time("optimize+selection");
   const setup = { ids: proxy.ids, customSkinningBones: [], normalAdjustmentPosition: null };
   const adjust = sd.normalAlignmentSetting?.adjustmentTransform?.transformId;
   setup.normalAdjustmentPosition = hierarchy.world(adjust && hierarchy.has(adjust) ? adjust : cloth.transformId).position.map(fr);
@@ -640,8 +728,10 @@ export function buildMeshCloth(transforms, cloth, params, hierarchy = prefabHier
     });
   }
   convertProxyMesh(proxy, setup, sd);
+  time("convertProxyMesh");
   if (proxy.vcnt > 32767 || proxy.edges.length > 32767 || proxy.triangles.length > 32767) throw new Error("MagicaCloth2: proxy mesh too large");
   const mappings = renderMeshes.map(({ vm, ref }) => mapping(vm, proxy, (({ meshData, ...rest }) => rest)(ref)));
+  time("mapping");
 
   const V = proxy.vcnt;
   const out = {
@@ -668,10 +758,12 @@ export function buildMeshCloth(transforms, cloth, params, hierarchy = prefabHier
     initLocalToWorld: proxy.initLocalToWorld.map(fr),
     transformIds: proxy.ids,
   };
+  const distance = distanceData(proxy), bending = bendingData(proxy);
+  time("constraints");
   return {
     proxy: out, mappings,
-    distance: distanceData(proxy),
-    bending: bendingData(proxy),
+    distance,
+    bending,
     initLocalGravityDirection: initLocalGravityDirection(proxy, M.normalizesafe(params.worldGravityDirection)),
     build: {
       averageVertexDistance: proxy.averageVertexDistance, maxVertexDistance: proxy.maxVertexDistance,
