@@ -12,6 +12,8 @@ import { PhysicsPanelShape } from "./physics-panel.js";
 import { PhysicsEdgeContact } from "./physics-edge.js";
 import { SpringRig } from "./unity-springbone.js";
 import { SpringBoneBinding } from "./unity-springbone-three.js";
+import { MagicaClothBinding } from "./magica-cloth2/three-binding.js";
+import { primitiveMesh } from "./cloth-geometry.js";
 export { maximumStretch } from "./physics-math.js";
 
 const STEP = 1 / 60;
@@ -151,9 +153,12 @@ export async function createModelPhysics(root, parts, { meshClothEnabled = true 
   }
   const result = new ModelPhysics(root, definitions);
   try {
-    if (meshClothEnabled && definitions.some(({ physics }) => physics.cloths?.length)) {
+    // generic cloths on a mesh the MagicaCloth2 port already simulates are its fallback data: drop them
+    const generic = !meshClothEnabled || !result.magicaMeshes.size ? definitions : definitions.map((d) => ({ ...d, physics: { ...d.physics,
+      cloths: (d.physics.cloths ?? []).filter((c) => !result.magicaMeshes.has(d.resolvePrimitive(c.node, c.primitive))) } }));
+    if (meshClothEnabled && generic.some(({ physics }) => physics.cloths?.length)) {
       const { createMeshCloth } = await import("./mesh-cloth.js");
-      result.meshCloth = await createMeshCloth(root, definitions);
+      result.meshCloth = await createMeshCloth(root, generic);
     }
     return result;
   } catch (error) {
@@ -169,6 +174,8 @@ export class ModelPhysics {
     this.enabled = true;
     this.records = [];
     this.sourceSprings = [];
+    this.sourceMagica = [];
+    this.magicaMeshes = new Set();
     this.colliders = [];
     this.collisionEdges = [];
     this.edgeContact = new PhysicsEdgeContact();
@@ -197,8 +204,24 @@ export class ModelPhysics {
         }
       });
     }
-    for (const { physics, resolve } of definitions) {
+    for (const { physics, resolve, resolvePrimitive } of definitions) {
       validatePhysics(physics);
+      // Source-faithful MagicaCloth2 (physics.source.magicaCloth2, PreBuild cloths only).  Its BoneCloth bones and
+      // MeshCloth meshes replace the generic springs / cloths the converter keeps as a fallback for them.
+      const magicaNodes = new Set();
+      const magicaSource = physics.source?.magicaCloth2;
+      if (magicaSource) {
+        const binding = new MagicaClothBinding(magicaSource, root, {
+          resolve, resolvePrimitive: resolvePrimitive ?? ((index, primitive) => primitiveMesh(resolve(index), primitive)),
+        });
+        for (const node of binding.drivenObjects) {
+          if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
+          if (HUMANOID_BONE_NAMES.has(node.name)) throw new Error(`physics 不得覆盖 Humanoid 核心骨 ${node.name}`);
+          owned.add(node); magicaNodes.add(node);
+        }
+        for (const m of binding.meshes) this.magicaMeshes.add(m.mesh);
+        this.sourceMagica.push(binding);
+      }
       const colliders = physics.colliders.map((definition) => {
         const shape = definition.shape === "panel" ? new PhysicsPanelShape()
           : definition.shape === "plane" ? new VRMSpringBoneColliderShapePlane()
@@ -239,9 +262,10 @@ export class ModelPhysics {
         this.colliders.push(record);
         return record.collider;
       });
-      const springs = [];
+      const springs = [];   // indexed like physics.springs (null: replaced by MagicaCloth2)
       for (const definition of physics.springs) {
         const node = resolve(definition.node);
+        if (magicaNodes.has(node)) { springs.push(null); continue; }
         if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
         if (HUMANOID_BONE_NAMES.has(node.name)) throw new Error(`physics 不得覆盖 Humanoid 核心骨 ${node.name}`);
         owned.add(node);
@@ -268,10 +292,11 @@ export class ModelPhysics {
           output: node.quaternion.clone(), outputWorld: node.matrixWorld.clone() };
         this.records.push(record); springs.push(record);
       }
-      for (const edge of physics.collisionEdges ?? []) this.collisionEdges.push({
-        records: edge.springs.map((i) => springs[i]),
-        colliders: edge.colliders.map((i) => this.colliders.find((r) => r.collider === colliders[i])),
-      });
+      for (const edge of physics.collisionEdges ?? []) {
+        const records = edge.springs.map((i) => springs[i]);
+        if (records.includes(null)) continue;
+        this.collisionEdges.push({ records, colliders: edge.colliders.map((i) => this.colliders.find((r) => r.collider === colliders[i])) });
+      }
       // Source-faithful UnityChan SpringBone (physics.source.unitySpringBone): the game's own parameters and
       // algorithm, simulated in Unity space and bound to this skeleton by its rest pose.
       const source = physics.source?.unitySpringBone;
@@ -295,6 +320,7 @@ export class ModelPhysics {
 
   beforeAnimation() {
     this.meshCloth?.beforeAnimation();
+    for (const m of this.sourceMagica) m.restore();
     for (const r of this.records) { r.node.quaternion.copy(r.base); r.node.updateMatrix(); }
     for (const s of this.sourceSprings) s.objects.forEach((node, i) => { node.quaternion.copy(s.base[i]); node.updateMatrix(); });
   }
@@ -303,12 +329,14 @@ export class ModelPhysics {
     this.beforeAnimation();
     this.enabled = Boolean(enabled);
     this.meshCloth?.setEnabled(this.enabled);
+    if (!this.enabled) for (const m of this.sourceMagica) m.release();
     this.reset();
     this.root.updateMatrixWorld(true);
   }
 
   reset(warmupSteps = 30, clothWarmupSteps = warmupSteps) {
     this.meshCloth?.reset(clothWarmupSteps);
+    for (const m of this.sourceMagica) m.reset();
     this.warmupSteps = warmupSteps;
     this.needsReset = true;
     this.accumulator = 0;
@@ -323,9 +351,11 @@ export class ModelPhysics {
       animate(dt);
       this.update(dt);
       afterPhysics();
+      this.stepSourceMagica(dt);
       this.syncPose();
     };
-    if (!this.enabled || (!this.records.length && !this.sourceSprings.length && !this.meshCloth?.records.length)) {
+    if (!this.enabled || (!this.records.length && !this.sourceSprings.length && !this.meshCloth?.records.length
+      && !this.sourceMagica.some((m) => m.teams.length))) {
       tick(delta + this.frameAccumulator);
       this.frameAccumulator = 0;
       return;
@@ -342,6 +372,7 @@ export class ModelPhysics {
       this.reset(2);
       this.update(0);
       afterPhysics();
+      this.stepSourceMagica(0);
       this.syncPose();
       return;
     }
@@ -350,6 +381,15 @@ export class ModelPhysics {
     this.frameAccumulator = Math.max(0, this.frameAccumulator - count * STEP);
     if (!count && this.needsReset) tick(0);
     for (let i = 0; i < count; i += 1) tick(STEP);
+  }
+
+  /**
+   * MagicaCloth2 runs in Unity's AfterLateUpdate: after the animation, the SpringBones and every LateUpdate
+   * behaviour (sub-bones, afterPhysics), once per rendered frame with the frame's delta time.
+   */
+  stepSourceMagica(delta) {
+    if (!this.enabled) return;
+    for (const m of this.sourceMagica) m.update(delta);
   }
 
   updateColliders(matricesReady = false) {
@@ -536,6 +576,9 @@ export class ModelPhysics {
     this.beforeAnimation();
     this.meshCloth?.destroy();
     this.meshCloth = null;
+    for (const m of this.sourceMagica) m.destroy();
+    this.sourceMagica.length = 0;
+    this.magicaMeshes.clear();
     this.records.length = 0;
     this.sourceSprings.length = 0;
     this.colliders.length = 0;

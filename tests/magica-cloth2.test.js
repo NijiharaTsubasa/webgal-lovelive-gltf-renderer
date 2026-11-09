@@ -1,0 +1,255 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import * as THREE from "three";
+import { Hierarchy } from "../src/unity-springbone.js";
+import { decodeMagicaCloth2, evaluateAnimationCurve, convertFloatArray } from "../src/magica-cloth2/data.js";
+import { MagicaClothTeam, simulationPower } from "../src/magica-cloth2/cloth.js";
+import { createTeam, teamFrameTime } from "../src/magica-cloth2/team.js";
+import { solveTriangleBending } from "../src/magica-cloth2/constraints.js";
+import { MagicaClothBinding } from "../src/magica-cloth2/three-binding.js";
+import { ModelPhysics } from "../src/model-physics.js";
+
+// converter physics.source.magicaCloth2 of 3d_costume_1001103101 (Kaho), trimmed to the skirt (MeshCloth, edge
+// collision, 9 colliders), back hair (BoneCloth with triangles) and necktie (BoneCloth, no colliders)
+const fixture = () => JSON.parse(readFileSync(new URL("./fixtures/magica-cloth2/3d_costume_1001103101.json", import.meta.url), "utf8"));
+const byBuild = (decoded, id) => decoded.cloths.find((c) => c.buildId === `Extension_MagicaCloth_${id}`);
+
+function hierarchyWorld(h) {
+  return (id) => {
+    const m = h.matrix(id);
+    return { matrix: [m[0], m[4], m[8], 0, m[1], m[5], m[9], 0, m[2], m[6], m[10], 0, m[3], m[7], m[11], 1],
+      position: [m[3], m[7], m[11]], rotation: h.rotation(id),
+      scale: [Math.hypot(m[0], m[4], m[8]), Math.hypot(m[1], m[5], m[9]), Math.hypot(m[2], m[6], m[10])] };
+  };
+}
+const finite = (list) => list.every((v) => v.every(Number.isFinite));
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+test("MagicaCloth2 PreBuild data decodes into consistent proxy meshes and constraints", () => {
+  const decoded = decodeMagicaCloth2(fixture());
+  const skirt = byBuild(decoded, "Skirt"), hair = byBuild(decoded, "BackHair"), tie = byBuild(decoded, "Necktie");
+  assert.equal(skirt.proxy.count, 154);
+  assert.equal(skirt.proxy.isBoneCloth, false);
+  assert.equal(skirt.proxy.triangles.length, 273 * 3);
+  assert.equal(skirt.mappings.length, 1);
+  assert.equal(skirt.mappings[0].referenceIndices.length, 1191);
+  assert.equal(skirt.colliders.length, 9);
+  assert.equal(skirt.params.colliderCollisionConstraint.mode, 2);
+  assert.equal(hair.proxy.isBoneCloth, true);
+  assert.equal(hair.proxy.count, 25);
+  assert.equal(tie.colliders.length, 0);
+  for (const c of [skirt, hair, tie]) {
+    const n = c.proxy.count;
+    assert.equal(c.proxy.transformIds.length, c.proxy.isBoneCloth ? n + 1 : c.proxy.transformIds.length);
+    assert.ok(c.proxy.parent.every((p) => p >= -1 && p < n) && c.proxy.root.every((r) => r >= -1 && r < n));
+    // distance links: Pack12_20 (count, start) inside the data arrays
+    for (const pack of c.distance.index) assert.ok((pack & 0xfffff) + (pack >>> 20) <= c.distance.data.length);
+    assert.ok([...c.distance.data].every((v) => v < n));
+    if (c.bending) for (const pair of c.bending.pairs) assert.ok(pair.every((v) => v < n) && new Set(pair).size === 4);
+    // every proxy vertex is fixed or moving (Flag_Fixed / Flag_Move), depth in [0, 1]
+    assert.ok(c.proxy.attr.every((a) => (a & 0x03) !== 0) && c.proxy.depth.every((d) => d >= 0 && d <= 1));
+  }
+  assert.ok(hair.bending.pairs.length > 0, "BackHair triangle bending pairs survive the uint64 round trip");
+});
+
+test("MagicaCloth2 parameters follow GetClothParameters (curves, 20 % damping / restoration)", () => {
+  const curve = { m_Curve: [{ time: 0, value: 0.5, inSlope: 0, outSlope: 0, weightedMode: 0 }, { time: 1, value: 1, inSlope: 1.6037737, outSlope: 1.6037737, weightedMode: 0 }] };
+  assert.equal(evaluateAnimationCurve(curve, 0), 0.5);
+  assert.equal(evaluateAnimationCurve(curve, 1), 1);
+  // Hermite: h00 y0 + h10 m0 + h01 y1 + h11 m1 at t = 0.5 -> 0.5 * 0.5 + 0.5 * 1 - 0.125 * 1.6037737
+  assert.ok(Math.abs(evaluateAnimationCurve(curve, 0.5) - (0.75 - 0.125 * 1.6037737)) < 1e-12);
+  assert.deepEqual(convertFloatArray({ value: 0.3, useCurve: 0, curve }), new Array(16).fill(0.3));
+  const sampled = convertFloatArray({ value: 0.4, useCurve: 1, curve });
+  assert.ok(Math.abs(sampled[0] - 0.2) < 1e-7 && Math.abs(sampled[15] - 0.4) < 1e-7);
+  const skirt = byBuild(decodeMagicaCloth2(fixture()), "Skirt");
+  assert.ok(Math.abs(skirt.params.dampingCurveData[15] - 0.4 * 0.2) < 1e-7);
+  // game: 50 Hz -> t = 90 / 50 = 1.8
+  assert.deepEqual(simulationPower(50).map((x) => +x.toFixed(6)), [1.8, +Math.sqrt(1.8).toFixed(6), +Math.pow(1.8, 0.3).toFixed(6), +Math.pow(1.8, 1.8).toFixed(6)]);
+});
+
+test("MagicaCloth2 time: 50 simulation steps per 60 frames, at most 5 per frame", () => {
+  const team = createTeam({ initScale: [1, 1, 1], centerTransformIndex: 0 }, { inertiaConstraint: {} }, { initLocalGravityDirection: [0, -1, 0] });
+  let steps = 0;
+  for (let f = 0; f < 600; f++) {
+    teamFrameTime(team, 1 / 60, 1 / 50, 5);
+    steps += team.updateCount;
+    team.nowUpdateTime += team.updateCount / 50;   // what SimulationStepTeamUpdate does once per step
+    team.timeReset = false;
+  }
+  assert.ok(Math.abs(steps - 500) <= 1, `${steps} steps`);
+  teamFrameTime(team, 0.5, 1 / 50, 5);
+  assert.equal(team.updateCount, 5);
+  assert.equal(team.skipCount, 20);
+});
+
+test("MagicaCloth2 triangle bending keeps a bent quad at its rest angle", () => {
+  // v0, v1 opposite corners, v2-v3 the shared edge; rest: folded 90 degrees
+  const pos = [[0, 0, 1], [1, 0, 0], [0, 0, 0], [0, 1, 0]];
+  const s = {
+    count: 4, attr: [0x01, 0x02, 0x01, 0x01], depth: [0, 1, 0, 0], friction: [0, 0, 0, 0],
+    nextPos: pos.map((p) => p.slice()), tmpVecA: new Int32Array(12), tmpCount: new Int32Array(4),
+    bending: { pairs: [[0, 1, 2, 3]], restAngleOrVolume: Float32Array.from([Math.PI / 2]), signOrVolume: Int8Array.from([1]) },
+  };
+  const team = { scaleRatio: 1, params: { triangleBendingConstraint: { method: 2, stiffness: 1 } } };
+  s.nextPos[1] = [0.9, 0, 0.45];   // disturb the free corner
+  const angle = () => {
+    const [p0, p1, p2, p3] = s.nextPos, e = [p3[0] - p2[0], p3[1] - p2[1], p3[2] - p2[2]];
+    const n1 = new THREE.Vector3(...p2).sub(new THREE.Vector3(...p0)).cross(new THREE.Vector3(...p3).sub(new THREE.Vector3(...p0))).normalize();
+    const n2 = new THREE.Vector3(...p3).sub(new THREE.Vector3(...p1)).cross(new THREE.Vector3(...p2).sub(new THREE.Vector3(...p1))).normalize();
+    return Math.acos(n1.dot(n2)) * Math.sign(new THREE.Vector3().crossVectors(n1, n2).dot(new THREE.Vector3(...e)));
+  };
+  const before = Math.abs(angle() - Math.PI / 2);
+  for (let i = 0; i < 20; i++) solveTriangleBending(s, team, [1, 1, 1, 1]);
+  assert.ok(Math.abs(angle() - Math.PI / 2) < before * 0.05, `${angle()} vs ${Math.PI / 2}`);
+  assert.deepEqual(s.nextPos[0], pos[0], "fixed vertices are not moved");
+});
+
+test("MagicaCloth2 teams start at the base pose and stay finite and bounded under motion", () => {
+  const source = fixture();
+  const decoded = decodeMagicaCloth2(source);
+  const h = new Hierarchy(source.transforms);
+  const world = hierarchyWorld(h);
+  const teams = decoded.cloths.map((c) => new MagicaClothTeam(c));
+  const restLocal = new Map();
+  for (const t of teams) if (t.proxy.isBoneCloth) t.proxy.transformIds.slice(0, t.proxy.count).forEach((id) => restLocal.set(id, h.localRot.get(id)));
+  const skirtTeam = teams.find((t) => !t.proxy.isBoneCloth);
+  // frame 1 (stabilization: blend weight 0): output = skinned base pose
+  for (const t of teams) {
+    const out = t.frame(1 / 60, world);
+    if (out.bones) {
+      out.bones.forEach((b, v) => {
+        if (!b?.localRotation) return;
+        const q = new THREE.Quaternion(...b.localRotation), r = new THREE.Quaternion(...restLocal.get(t.proxy.transformIds[v]));
+        // not exact: line / triangle rotations use the PreBuild-time local frames (vertexLocalRotations,
+        // normalAdjustmentRotations), a few hundredths of a degree off the exported rest pose
+        assert.ok(q.angleTo(r) < 0.1 * Math.PI / 180, `${t.def.buildId} bone ${v}: ${q.angleTo(r)}`);
+      });
+    } else {
+      const m = out.meshes[0], center = world(m.mapping.centerTransformId);
+      let max = 0;
+      m.positions.forEach((p, k) => { if (p) max = Math.max(max, dist(p, mPoint(center.matrix, m.mapping.localPositions[k]))); });
+      assert.ok(max < 1e-5, `skirt render vertices at the base pose: ${max}`);
+      assert.equal(m.positions.filter(Boolean).length, 1018);
+    }
+  }
+  // sway the prefab root 15 cm at 1 Hz for 4 s
+  const roots = source.transforms.filter((t) => t.parentId === null).map((t) => t.id);
+  const rest = roots.map((id) => h.localPos.get(id).slice());
+  let maxLag = 0;
+  for (let f = 1; f < 240; f++) {
+    roots.forEach((id, i) => h.setLocal(id, { pos: [rest[i][0] + 0.15 * Math.sin(2 * Math.PI * f / 60), rest[i][1], rest[i][2]] }));
+    for (const t of teams) {
+      t.frame(1 / 60, world);
+      assert.ok(finite(t.state.positions) && finite(t.state.rotations), `${t.def.buildId} frame ${f}`);
+    }
+    const s = skirtTeam.state;
+    s.positions.forEach((p, v) => { if (s.attr[v] & 2) maxLag = Math.max(maxLag, dist(p, s.basePos[v])); });
+  }
+  assert.ok(maxLag > 0.005 && maxLag < 0.25, `skirt lag behind its base pose: ${maxLag}`);
+});
+const mPoint = (m, p) => [m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]];
+
+// three.js scene for the fixture: every transform an Object3D (glTF frame = Unity X mirror), the skirt renderer a
+// SkinnedMesh whose vertices are the mapping mesh's rest positions, skinned rigidly to the renderer transform.
+function sceneFor(source) {
+  const root = new THREE.Group();
+  const objects = [], byId = new Map();
+  source.transforms.forEach((t, i) => {
+    const o = new THREE.Object3D();
+    o.name = t.name;
+    o.position.set(-t.localPosition[0], t.localPosition[1], t.localPosition[2]);
+    o.quaternion.set(t.localRotation[0], -t.localRotation[1], -t.localRotation[2], t.localRotation[3]);
+    o.scale.fromArray(t.localScale);
+    t.node = i; objects.push(o); byId.set(t.id, o);
+  });
+  source.transforms.forEach((t) => (t.parentId === null ? root : byId.get(t.parentId)).add(byId.get(t.id)));
+  root.updateMatrixWorld(true);
+  const skirt = decodeMagicaCloth2(source).cloths.find((c) => c.mappings?.length).mappings[0];
+  const rendererIndex = source.transforms.findIndex((t) => t.id === skirt.renderer.transformId);
+  for (const c of source.components) {
+    for (const s of c.fields.serializeData2?.preBuildData?.uniquePreBuildData?.renderSetupDataList ?? []) {
+      s.renderer.mesh.node = rendererIndex; s.renderer.mesh.primitives = 1;
+    }
+  }
+  const n = Math.max(...skirt.referenceIndices) + 1;
+  const position = new Float32Array(n * 3), normal = new Float32Array(n * 3);
+  skirt.referenceIndices.forEach((vi, k) => {
+    const p = skirt.localPositions[k], q = skirt.localNormals[k];
+    position.set([-p[0], p[1], p[2]], vi * 3); normal.set([-q[0], q[1], q[2]], vi * 3);
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  geometry.setAttribute("skinIndex", new THREE.BufferAttribute(new Uint16Array(n * 4), 4));
+  geometry.setAttribute("skinWeight", new THREE.BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 ? 0 : 1)), 4));
+  const holder = objects[rendererIndex], bone = new THREE.Bone();
+  holder.add(bone);
+  const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial());
+  holder.add(mesh);
+  root.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton([bone]), mesh.matrixWorld);
+  return { root, objects, mesh, resolve: (i) => objects[i], resolvePrimitive: () => mesh };
+}
+
+test("MagicaCloth2 three binding: base pose reproduces the rest mesh, motion moves bones and vertices, release restores", () => {
+  const source = fixture();
+  const { root, mesh, resolve, resolvePrimitive } = sceneFor(source);
+  const binding = new MagicaClothBinding(source, root, { resolve, resolvePrimitive });
+  assert.equal(binding.teams.length, 3);
+  assert.equal(binding.mirror, true);
+  assert.ok(binding.rmsFitError < 1e-6);
+  const original = mesh.geometry.getAttribute("position").array.slice();
+  const vertexWorld = (vi) => mesh.localToWorld(mesh.getVertexPosition(vi, new THREE.Vector3()));
+  const map = binding.meshes[0].mapping;
+  const moving = map.referenceIndices.filter((_, k) => (map.attr[k] & 0x02) && !(map.attr[k] & 0x01));
+  const rest = new Map(moving.map((vi) => [vi, vertexWorld(vi)]));
+  const restBones = binding.bones.map((b) => b.node.getWorldPosition(new THREE.Vector3()));
+  binding.update(1 / 60);
+  let max = 0;
+  for (const vi of moving) max = Math.max(max, vertexWorld(vi).distanceTo(rest.get(vi)));
+  assert.ok(max < 1e-5, `frame 1 vertices ${max}`);
+  binding.bones.forEach((b, i) => assert.ok(b.node.getWorldPosition(new THREE.Vector3()).distanceTo(restBones[i]) < 1e-5));
+  for (let f = 1; f < 90; f++) {
+    binding.restore();
+    root.position.x = 0.2 * Math.sin(2 * Math.PI * f / 60);
+    root.updateMatrixWorld(true);
+    binding.update(1 / 60);
+  }
+  root.position.x = 0; root.updateMatrixWorld(true);
+  let vmax = 0, bmax = 0;
+  for (const vi of moving) vmax = Math.max(vmax, vertexWorld(vi).distanceTo(rest.get(vi)));
+  binding.bones.forEach((b, i) => { bmax = Math.max(bmax, b.node.getWorldPosition(new THREE.Vector3()).distanceTo(restBones[i])); });
+  assert.ok(vmax > 1e-3 && Number.isFinite(vmax), `vertices moved ${vmax}`);
+  assert.ok(bmax > 1e-3 && Number.isFinite(bmax), `bones moved ${bmax}`);
+  binding.release();
+  assert.deepEqual(mesh.geometry.getAttribute("position").array, original);
+  binding.bones.forEach((b, i) => assert.ok(b.node.getWorldPosition(new THREE.Vector3()).distanceTo(restBones[i]) < 1e-9));
+});
+
+test("ModelPhysics runs MagicaCloth2 after the other physics and drops the generic springs it replaces", () => {
+  const source = fixture();
+  const { root, resolve, resolvePrimitive } = sceneFor(source);
+  const hairBone = decodeMagicaCloth2(source).cloths.find((c) => c.buildId.endsWith("BackHair"));
+  const movingIndex = hairBone.proxy.attr.findIndex((a) => a & 0x02);
+  const node = source.transforms.findIndex((t) => t.id === hairBone.proxy.transformIds[movingIndex]);
+  const physics = { colliders: [], springs: [{ node, tail: [0, -0.1, 0], radius: 0, stiffness: 1, damping: 0.5, gravity: [0, 0, 0], colliders: [] }],
+    source: { magicaCloth2: source } };
+  const model = new ModelPhysics(root, [{ physics, resolve, resolvePrimitive }]);
+  assert.equal(model.records.length, 0, "generic spring on a MagicaCloth2 bone is skipped");
+  assert.equal(model.sourceMagica[0].teams.length, 3);
+  assert.equal(model.magicaMeshes.size, 1);
+  const order = [];
+  const target = resolve(node), rest = target.getWorldPosition(new THREE.Vector3());
+  for (let f = 0; f < 60; f++) {
+    model.advance(1 / 60, () => { root.position.x = 0.2 * Math.sin(2 * Math.PI * f / 60); order.push("animate"); }, () => order.push("after"));
+  }
+  assert.deepEqual(order.slice(0, 4), ["animate", "after", "animate", "after"]);
+  root.position.x = 0; root.updateMatrixWorld(true);
+  model.advance(1 / 60, () => {});
+  assert.ok(target.getWorldPosition(new THREE.Vector3()).distanceTo(rest) > 1e-3, "BackHair bone simulated");
+  model.setEnabled(false);
+  root.updateMatrixWorld(true);
+  assert.ok(target.getWorldPosition(new THREE.Vector3()).distanceTo(rest) < 1e-9, "disabled physics restores the bone");
+  model.destroy();
+});

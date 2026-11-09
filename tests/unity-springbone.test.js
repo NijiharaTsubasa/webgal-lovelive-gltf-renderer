@@ -144,7 +144,7 @@ test("source SpringBone validation and node ownership", () => {
   assert.throws(() => new ModelPhysics(root, [{ physics, resolve: (index) => objects[index] }]), /重复控制节点/);
 });
 
-test("source MagicaCloth2 data validates like the SpringBone table and is otherwise inert for now", () => {
+test("source MagicaCloth2 data validates like the SpringBone table; undecodable cloths are reported, not simulated", () => {
   const data = {
     transforms: [{ id: "1", name: "root", parentId: null, localPosition: [0, 0, 0], localRotation: [0, 0, 0, 1], localScale: [1, 1, 1], node: 0 },
       { id: "2", name: "SP_Hair_01", parentId: "1", localPosition: [0, 1, 0], localRotation: [0, 0, 0, 1], localScale: [1, 1, 1], node: null }],
@@ -154,6 +154,9 @@ test("source MagicaCloth2 data validates like the SpringBone table and is otherw
   const root = new THREE.Group();
   const model = new ModelPhysics(root, [{ physics: { colliders: [], springs: [], source: { magicaCloth2: data } }, resolve: () => root }]);
   assert.equal(model.sourceSprings.length, 0);
+  assert.equal(model.sourceMagica.length, 1);
+  assert.equal(model.sourceMagica[0].teams.length, 0);
+  assert.equal(model.sourceMagica[0].unsupported.length, 1);
   const broken = structuredClone(data);
   broken.components[0].transformId = "9";
   assert.throws(() => validatePhysics({ colliders: [], springs: [], source: { magicaCloth2: broken } }), /magicaCloth2 component/);

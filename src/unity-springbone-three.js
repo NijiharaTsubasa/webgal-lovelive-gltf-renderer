@@ -15,7 +15,7 @@
 import { Matrix4, Quaternion, Vector3 } from "three";
 import { qmul, qinv } from "./unity-springbone.js";
 
-const mirrorQ = (q) => [q[0], -q[1], -q[2], q[3]];  // reflect a rotation through the YZ plane (X mirror)
+export const mirrorQ = (q) => [q[0], -q[1], -q[2], q[3]];  // reflect a rotation through the YZ plane (X mirror)
 const sanitize = (n) => n.replace(/\s/g, "_").replace(/[\[\]\.:\/]/g, ""); // three's PropertyBinding.sanitizeNodeName
 
 // Largest eigenvector of a symmetric 4x4 (cyclic Jacobi), used by Horn's absolute orientation.
@@ -44,7 +44,7 @@ function maxEigenvector(N) {
 }
 
 // Similarity fit dst ~ s * R * src + t (Horn 1987).  Returns {q:[x,y,z,w], s, t, rms}.
-function fitSimilarity(src, dst) {
+export function fitSimilarity(src, dst) {
   const n = src.length;
   const cs = [0, 0, 0], cd = [0, 0, 0];
   for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { cs[k] += src[i][k] / n; cd[k] += dst[i][k] / n; }

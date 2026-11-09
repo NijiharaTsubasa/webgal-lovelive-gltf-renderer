@@ -123,7 +123,7 @@
 | 资产（ScriptableObject） | `{ "asset", "class" }` |
 | 贴图 | `{ "texture" }` |
 
-原始字节数组写成 `{ "base64" }`：包括 `ExSimpleNativeArray` 的 `arrayBytes`，以及 VirtualMesh、RenderSetupData 的 `byte[]` 字段。内容是 MagicaCloth2 序列化时的小端结构体原样。
+原始字节数组写成 `{ "base64" }`：包括 `ExSimpleNativeArray` 的 `arrayBytes`，以及 VirtualMesh、RenderSetupData 的 `byte[]` 字段。内容是 MagicaCloth2 序列化时的小端结构体原样。`ExSimpleNativeArray` 只有前 `count` 个元素有效（容量可能更大）。ulong 数组（三角弯曲的 `trianglePairArray`）也写成小端 uint64 的 `{ "base64" }`，因为 JSON 数字放不下 2^53 以上的位。
 
 浮点数是 float32 值的最短十进制写法，用 `Math.fround` 即可还原出精确的 float32。
 
@@ -133,7 +133,16 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 - 该资产里 `buildId` 相同的那一项 SharePreBuildData 嵌入为 `sharePreBuildData`，包括代理网格、渲染映射、距离 / 弯曲 / 惯性约束数据；
 - `sharePreBuildData.renderSetupDataList` 省略了原始网格的整份拷贝（顶点、法线、切线、绑定矩阵、蒙皮权重），因为 GLB 里有这个网格，渲染顶点到代理点的映射和网格空间顶点在 `renderMeshList` 里。
 
-求解器正在移植。在求解器完成之前，转换器同时输出通用的 `springs` / `cloths` 作为后备，渲染器使用后备数据，`source.magicaCloth2` 只做校验。
+渲染器用移植的 MagicaCloth2 求解器（`src/magica-cloth2/`，按 v2.16.0 源码逐函数移植）模拟带 PreBuild 数据的布料，按游戏版本（约 2.10）和游戏设置运行：
+- 每个渲染帧（1/60 s）在所有 LateUpdate 之后（SpringBone、辅助骨、`afterPhysics` 之后）运行一次；模拟频率 50 Hz，每帧最多 5 步（游戏的 `MagicaClothCalculate.SetSimulationSettings`）；
+- 显示位置预测不带 2.11.1 加入的离根距离限幅（`MaxDistanceRatioFutuerPrediction`）；
+- 帧开始时 BoneCloth 骨回到初始局部姿态（`RestoreTransform`），动作随后可以覆盖；移动骨写局部位置和旋转，固定骨写世界旋转；
+- MeshCloth 把映射网格的非固定顶点写回渲染网格：按当帧蒙皮矩阵反算到网格空间，显示出来正好是求解得到的世界位置，法线同步；
+- Unity 与 three.js 坐标的关系和 `unitySpringBone` 一样由静止姿态拟合。
+
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 数据（运行时构建代理网格未移植）、负缩放、anchor、自碰撞、非 Normal 更新模式、多 primitive 的渲染网格。
+
+转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 
 ## 2. 运行语义
 
