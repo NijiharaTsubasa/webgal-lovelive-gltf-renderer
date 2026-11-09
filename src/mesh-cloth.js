@@ -97,9 +97,6 @@ class Cloth {
       this.wasCulled = this.mesh.frustumCulled;
       this.mesh.frustumCulled = false;
       this.scratch = { linear: new THREE.Matrix3(), point: new THREE.Vector3(), axis: new THREE.Vector3() };
-      // Capture authored layering before the first action changes the pose.
-      this.sampleTargets();
-      this.solver.markAuthoredEdges(this.targets, this.colliderPoses());
     } catch (error) { this.destroy(); throw error; }
   }
 
@@ -698,7 +695,6 @@ export async function createMeshCloth(root, definitions) {
 
   const geometries = new Set();
   try {
-    root.updateMatrixWorld(true);
     for (const { definition, physics, resolve, resolvePrimitive } of entries) {
       const mesh = resolvePrimitive ? resolvePrimitive(definition.node, definition.primitive)
         : primitiveMesh(resolve(definition.node), definition.primitive);
