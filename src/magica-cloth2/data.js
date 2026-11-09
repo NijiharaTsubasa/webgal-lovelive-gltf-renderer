@@ -1,8 +1,10 @@
 // Decode physics.source.magicaCloth2 (converter: verbatim MagicaCloth2 components + PreBuild data) into solver
 // inputs: ClothParameters (Cloth/ClothSerializeDataFunction.cs GetClothParameters) and the prebuilt proxy /
-// mapping meshes (VirtualMesh/Function/VirtualMeshSerialization.cs).  BoneCloths without PreBuild data are built
-// at runtime (build.js); MeshCloths without PreBuild data are not (selection + reduction are not ported).
+// mapping meshes (VirtualMesh/Function/VirtualMeshSerialization.cs).  Cloths without PreBuild data are built at
+// runtime like the game does: BoneCloth from the transform hierarchy (build.js), MeshCloth from the original Unity
+// mesh the converter exports as sourceRenderers[i].meshData (build-mesh.js).
 import { buildBoneCloth, prefabHierarchy } from "./build.js";
+import { buildMeshCloth } from "./build-mesh.js";
 const b64 = (s) => {
   if (typeof Buffer !== "undefined") { const b = Buffer.from(s, "base64"); return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); }
   const bin = atob(s), out = new Uint8Array(bin.length);
@@ -255,6 +257,10 @@ export function decodeMagicaCloth2(source) {
         hierarchy ??= prefabHierarchy(source.transforms);
         const { build, ...built } = buildBoneCloth(source.transforms, { transformId: c.transformId, ...c.fields }, cloth.params, hierarchy);
         Object.assign(cloth, built, { runtimeBuild: true, siblingOrder: build.siblingOrder });
+      } else if (sd.clothType === 0) {   // MeshCloth without PreBuild: from the original mesh (converter meshData)
+        hierarchy ??= prefabHierarchy(source.transforms);
+        const { build, ...built } = buildMeshCloth(source.transforms, { transformId: c.transformId, ...c.fields }, cloth.params, hierarchy);
+        Object.assign(cloth, built, { runtimeBuild: true });
       }
     } catch (error) {
       cloth.prebuilt = false;

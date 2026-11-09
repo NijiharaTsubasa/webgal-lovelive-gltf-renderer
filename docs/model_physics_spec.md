@@ -120,7 +120,7 @@
 |---|---|
 | Transform、GameObject | `{ "transformId" }` |
 | 组件 | `{ "transformId", "class" }` |
-| 蒙皮渲染器 | `{ "transformId", "class", "mesh": { "name", "node", "primitives" } }`，`node` 是 GLB 中对应的渲染节点索引 |
+| 蒙皮渲染器 | `{ "transformId", "class", "mesh": { "name", "node", "primitives" } }`，`node` 是 GLB 中对应的渲染节点索引。没有可用 PreBuild 的 MeshCloth，其 `sourceRenderers` 引用另带 `meshData`：原始 Unity 网格（`vertexCount`，`vertices` / `normals` / `tangents` / `uv` / `boneWeights` / `boneIndices` / `bindposes`（列主序）/ `triangles` 均为小端 `{ "base64" }`，加 `submeshTriangleCounts`、`bones`、`rootBone` 的 transform id）。GLB 网格不能代替：做过镜像、重新绑到归一化骨架、V 翻转 |
 | Mesh | `{ "mesh": { … } }` |
 | 资产（ScriptableObject） | `{ "asset", "class" }` |
 | 贴图 | `{ "texture" }` |
@@ -147,9 +147,9 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 代理网格的来源：
 - 有 PreBuild 数据时直接用；
 - 没有 PreBuild 的 BoneCloth 在解码时按游戏的运行时构建生成（`src/magica-cloth2/build.js`：RenderSetupData → ImportBoneType 的四种连接方式 → 去重三角形 → 选择数据 → ConvertProxyMesh → 距离 / 弯曲 / 惯性约束，包括自定义蒙皮），读预制体姿态（`prefabLocal*`）和子节点顺序（`siblingIndex`）。顺序取决于 C# HashSet 与 Unity.Collections 散列容器的遍历顺序，`native-hash.js` 照样复现；法线调整用游戏版本（2.13.0 之前）的算法，与 v2.16 源码不同；
-- 没有 PreBuild 的 MeshCloth 不模拟（选择与减面未移植）。
+- 没有 PreBuild 的 MeshCloth 在解码时从原始网格构建（`src/magica-cloth2/build-mesh.js`）：渲染网格导入并按预制体姿态蒙皮一次 → 按选择数据裁剪 → 并入代理网格 → 减面（SameDistance、SimpleDistance、ShapeDistance，再重组）→ 去重三角形、选择数据、ConvertProxyMesh（MeshCloth 基线）→ 渲染顶点到代理的直接映射 → 约束。需要转换器给渲染器引用加的 `meshData`。减面要排序代价相同的边（Unity.Collections 的 introsort，已照游戏二进制核对），平局的结果取决于浮点 ulp，所以代理顶点的编号不一定和游戏一致；合并点都取中点，形状和约束与游戏相同或几乎相同。
 
-不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 也没有 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
 
 转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 

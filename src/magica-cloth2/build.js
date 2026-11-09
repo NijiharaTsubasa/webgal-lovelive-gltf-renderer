@@ -11,7 +11,7 @@
 // (insertion order), and the game's topology (e.g. which quad diagonal survives) follows from those orders.
 // The pose is the prefab's serialized pose (what MagicaCloth.Awake reads), not the exported rest pose.
 import * as M from "./math.js";
-import { NativeParallelHashMap, hashInt, hashInt2Key, int2Key, int2X, int2Y, multiDataToArrays, arraysToMultiMap } from "./native-hash.js";
+import { NativeParallelHashMap, hashInt, hashInt2Key, int2Key, int2X, int2Y, multiDataToArrays, arraysToMultiMap, unitySort } from "./native-hash.js";
 
 const FIXED = 0x01, MOVE = 0x02, TRIANGLE = 0x80;
 const isMove = (a) => (a & MOVE) !== 0;
@@ -134,9 +134,11 @@ function importBones(setup, connectionMode) {
   const WtoL = M.m4inverse(LtoW);
   const invDir = (d) => { const len = M.length(d); return len > 0 ? M.mul(M.normalize(M.m4vector(WtoL, d)), len) : d; };
   const mesh = {
-    vcnt, initLocalToWorld: LtoW, initWorldToLocal: WtoL, initRotation: r.rotation, initInverseRotation: M.qinverse(r.rotation),
+    vcnt, isBoneCloth: true,
+    initLocalToWorld: LtoW, initWorldToLocal: WtoL, initRotation: r.rotation, initInverseRotation: M.qinverse(r.rotation),
     initScale: r.scale,
     localPositions: [], localNormals: [], localTangents: [], uv: [], boneWeights: [], skinBoneBindPoses: [],
+    skinBoneTransformIndices: Array.from({ length: vcnt }, (_, i) => i),
     attributes: new Uint8Array(vcnt), triangles: [], lines: [],
   };
   for (let v = 0; v < vcnt; v++) {   // Import_BoneVertexJob
@@ -465,7 +467,6 @@ function bestDirection(tset, dirs) {   // Proxy_OrganizeVertexToTrianglsJob fall
 
 // VirtualMesh.SetCustomSkinningBones: the bones join the transform list (after the center) and the skin bones
 function setCustomSkinningBones(mesh, setup) {
-  mesh.skinBoneTransformIndices = Array.from({ length: mesh.vcnt }, (_, i) => i);
   mesh.customSkinningBones = [];
   for (const bone of setup.customSkinningBones) {
     if (!bone) { mesh.customSkinningBones.push(null); continue; }
@@ -581,23 +582,26 @@ function convertProxyMesh(mesh, setup, sd) {
     }
   }
 
-  // ProxyCreateFixedListAndAABB: fixed vertices next to a moving one (or isolated)
-  const fixedList = [];
+  // ProxyCreateFixedListAndAABB: fixed vertices next to a moving one (or isolated).  A fixed vertex surrounded by
+  // fixed ones is skipped entirely, so it is also left out of the bounding box.
+  const fixedList = [], boxPoints = [];
   let lcen = [0, 0, 0];
   for (let i = 0; i < V; i++) {
-    if (isMove(attr[i])) continue;
-    const pack = mesh.vertexToVertex.index[i], dcnt = pack >>> 20, dstart = pack & 0xfffff;
-    let j = 0;
-    for (; j < dcnt; j++) if (isMove(attr[mesh.vertexToVertex.data[dstart + j]])) break;
-    if (j === dcnt && dcnt > 0) continue;
-    fixedList.push(i);
-    lcen = M.add(lcen, pos[i]);
+    if (!isMove(attr[i])) {
+      const pack = mesh.vertexToVertex.index[i], dcnt = pack >>> 20, dstart = pack & 0xfffff;
+      let j = 0;
+      for (; j < dcnt; j++) if (isMove(attr[mesh.vertexToVertex.data[dstart + j]])) break;
+      if (j === dcnt && dcnt > 0) continue;
+      fixedList.push(i);
+      lcen = M.add(lcen, pos[i]);
+    }
+    boxPoints.push(pos[i]);
   }
-  mesh.boundingBox = aabbOf(pos);
+  mesh.boundingBox = aabbOf(boxPoints);
   mesh.centerFixedList = fixedList;
   mesh.localCenterPosition = fixedList.length ? M.mul(lcen, 1 / fixedList.length) : [0, 0, 0];
 
-  createTransformBaseLine(mesh, setup);
+  if (mesh.isBoneCloth) createTransformBaseLine(mesh, setup); else createMeshBaseLine(mesh);
 
   // ProxyNormalAdjustment.  The game predates 2.13.0 ("Fixed the custom normal calculation algorithm"), so this is
   // its ProxyNormalRadiationAdjustmentJob as disassembled from libil2cpp.so (Execute, RVA 0x7E22DF0), not the 2.16
@@ -641,8 +645,8 @@ function convertProxyMesh(mesh, setup, sd) {
   mesh.vertexBindPoseRotations = [];
   for (let v = 0; v < V; v++) {
     const vrot = M.toRotation(mesh.localNormals[v], mesh.localTangents[v]);
-    const trot = M.qmul(mesh.initInverseRotation, setup.read[v].rotation);
-    mesh.vertexToTransformRotations.push(f4(M.qmul(M.qinverse(vrot), trot)));
+    if (mesh.isBoneCloth) mesh.vertexToTransformRotations.push(f4(M.qmul(M.qinverse(vrot), M.qmul(mesh.initInverseRotation, setup.read[v].rotation))));
+    else mesh.vertexToTransformRotations.push([0, 0, 0, 1]);
     mesh.vertexBindPosePositions.push(f3(M.neg(pos[v])));
     mesh.vertexBindPoseRotations.push(f4(M.qinverse(vrot)));
   }
@@ -690,6 +694,79 @@ function createTransformBaseLine(mesh, setup) {
     }
   }
   mesh.baseLine = { flags, start: starts, count: counts, data };
+  const child = multiDataToArrays(childMap, V);
+  mesh.childIndex = Array.from(child.index);
+  mesh.childData = child.data;
+}
+
+// CreateMeshBaseLine: parents grow out of the fixed vertices level by level; a moving vertex takes the fixed
+// neighbour nearest to it, or the moving neighbour that continues its parent line straightest
+function createMeshBaseLine(mesh) {
+  const V = mesh.vcnt, attr = mesh.attributes, pos = mesh.localPositions, vv = mesh.vertexToVertex;
+  mesh.parent = new Array(V).fill(-1);
+  const childMap = new NativeParallelHashMap(V, hashInt, true);
+  const fixedList = [];
+  for (let i = 0; i < V; i++) if (attr[i] & FIXED) fixedList.push(i);
+  const flags = [], starts = [], counts = [], data = [];
+  mesh.baseLine = { flags, start: starts, count: counts, data };
+  if (!fixedList.length) {
+    mesh.childIndex = new Array(V).fill(0);
+    mesh.childData = [];
+    return;
+  }
+  const mark = new Uint8Array(V);
+  const vertexMap = new NativeParallelHashMap(V, hashInt);
+  let nextList = fixedList.map((v) => ({ vindex: v, dist: 0 }));
+  const neighbours = (v) => { const p = vv.index[v], cnt = p >>> 20, s = p & 0xfffff; return vv.data.slice(s, s + cnt); };
+  while (nextList.length > 0) {
+    for (const { vindex } of nextList) {
+      if (isDontMove(attr[vindex])) continue;
+      let cost = -1, best = -1;   // ExCostSortedList1(-1, -1): the first of equal costs stays
+      for (const t of neighbours(vindex)) {
+        if (mark[t] === 0) continue;
+        let c;
+        if (isDontMove(attr[t])) c = distance32(pos[vindex], pos[t]);
+        else c = fr(M.angleV(sub32(pos[t], pos[vindex]), sub32(pos[mesh.parent[t]], pos[t])));
+        if (cost < 0 || c < cost) { cost = c; best = t; }
+      }
+      if (cost >= 0) { mesh.parent[vindex] = best; mark[vindex] = 1; }
+    }
+    for (const { vindex } of nextList) {
+      mark[vindex] = 2;
+      const p = mesh.parent[vindex];
+      if (p >= 0) childMap.uniqueAdd(p, vindex);
+    }
+    vertexMap.clear();
+    let mapcnt = 0;
+    for (const { vindex } of nextList) {
+      for (const t of neighbours(vindex)) {
+        if (isInvalid(attr[t]) || mark[t] !== 0) continue;
+        const d = distance32(pos[vindex], pos[t]);
+        const known = vertexMap.get(t);
+        if (known) { if (d < known.dist) known.dist = d; } else { vertexMap.add(t, { vindex: t, dist: d }); mapcnt++; }
+      }
+    }
+    nextList = [];
+    if (mapcnt > 0) {
+      for (const [, w] of vertexMap.entries()) nextList.push({ vindex: w.vindex, dist: w.dist });
+      unitySort(nextList, (a, b) => Math.sign(a.dist - b.dist));
+    }
+  }
+  for (const fv of fixedList) {
+    if (childMap.countValuesForKey(fv) === 0) continue;
+    const stack = [fv], start = data.length;
+    let count = 0, flag = 0;
+    while (stack.length) {
+      const v = stack.pop();
+      data.push(v);
+      count++;
+      if ((attr[v] & TRIANGLE) === 0) flag |= 1;
+      for (const c of childMap.valuesForKey(v)) stack.push(c);
+    }
+    flags.push(flag);
+    starts.push(start);
+    counts.push(count);
+  }
   const child = multiDataToArrays(childMap, V);
   mesh.childIndex = Array.from(child.index);
   mesh.childData = child.data;
@@ -946,3 +1023,11 @@ export function buildBoneCloth(transforms, cloth, params, hierarchy = prefabHier
     },
   };
 }
+
+// shared with build-mesh.js (MeshCloth runtime build)
+export {
+  FIXED, MOVE, TRIANGLE, isMove, isDontMove, isInvalid, MINIMUM_GRID_SIZE, FLOAT_MAX,
+  fr, f3, f4, sub32, dot32, length32, distance32, distancesq32, packInt2, packInt3,
+  aabbOf, sphereMappingUV, averageAndMaxVertexDistance, removeDuplicateTriangles, applySelection, convertProxyMesh,
+  distanceData, bendingData, initLocalGravityDirection,
+};

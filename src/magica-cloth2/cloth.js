@@ -46,7 +46,7 @@ export class MagicaClothTeam {
   constructor(def, { frequency = GAME_SIMULATION_FREQUENCY, maxCount = GAME_MAX_SIMULATION_COUNT_PER_FRAME, anchorTransformId = null } = {}) {
     if (def.error) throw new Error(def.error);
     if (!def.prebuilt && !def.runtimeBuild) {
-      throw new Error(`MagicaCloth2 ${def.buildId ?? def.transformId}: no PreBuild data and no runtime build (${def.clothType === 0 ? "MeshCloth reduction is not ported" : "unsupported"})`);
+      throw new Error(`MagicaCloth2 ${def.buildId ?? def.transformId}: no PreBuild data and no runtime build (clothType ${def.clothType})`);
     }
     if (def.params.inertiaConstraint.hasAnchor) throw new Error("MagicaCloth2: serialized inertia anchors are not supported");
     if (def.params.selfCollisionMode) throw new Error("MagicaCloth2: self collision is not supported");

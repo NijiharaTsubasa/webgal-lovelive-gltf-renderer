@@ -9,6 +9,7 @@ import { createTeam, teamFrameTime } from "../src/magica-cloth2/team.js";
 import { solveTriangleBending } from "../src/magica-cloth2/constraints.js";
 import { MagicaClothBinding } from "../src/magica-cloth2/three-binding.js";
 import { buildBoneCloth } from "../src/magica-cloth2/build.js";
+import { buildMeshCloth } from "../src/magica-cloth2/build-mesh.js";
 import { ModelPhysics } from "../src/model-physics.js";
 
 // converter physics.source.magicaCloth2 of 3d_costume_1001103101 (Kaho), trimmed to the skirt (MeshCloth, edge
@@ -334,11 +335,80 @@ test("MagicaCloth2 BoneCloths without PreBuild data are built at decode time and
       }
     }
   }
-  // MeshCloth without PreBuild data stays unsupported (reduction is not ported)
+  // a MeshCloth without PreBuild data needs the original mesh (converter meshData); without it, it is reported
   const source = fixture();
   delete source.components.find((c) => c.class === "MagicaCloth" && c.fields.serializeData.clothType === 0).fields.serializeData2.preBuildData;
   const skirt = decodeMagicaCloth2(source).cloths.find((d) => d.clothType === 0);
-  assert.throws(() => new MagicaClothTeam(skirt), /MeshCloth reduction is not ported/);
+  assert.throws(() => new MagicaClothTeam(skirt), /meshData/);
+});
+
+// ------------------------------------------------------------------ runtime MeshCloth build (no PreBuild data)
+// Two MeshCloths whose PreBuild the runtime build reproduces exactly (in general the vertex numbering can differ,
+// see build-mesh.js): Belt_B (SimpleDistance reduction) and RibbonTie (ShapeDistance reduction, normal alignment).
+const meshFixtures = () => ["3020103202", "3026103101"].map((id) => JSON.parse(readFileSync(new URL(`./fixtures/magica-cloth2/3d_costume_${id}.json`, import.meta.url), "utf8")));
+
+test("MagicaCloth2 runtime MeshCloth build reproduces the game's PreBuild data", () => {
+  let checked = 0;
+  for (const source of meshFixtures()) {
+    const decoded = decodeMagicaCloth2(source);
+    const raws = source.components.filter((c) => c.class === "MagicaCloth");
+    decoded.cloths.forEach((def, k) => {
+      if (def.clothType !== 0) return;
+      const raw = raws[k], pm = raw.fields.serializeData2.preBuildData.sharePreBuildData.proxyMesh;
+      const b = buildMeshCloth(source.transforms, { transformId: raw.transformId, ...raw.fields }, def.params);
+      const p = def.proxy, q = b.proxy, name = def.buildId;
+      for (const key of ["transformIds", "attr", "triangles", "lines", "edges", "parent", "centerFixedList", "childIndex", "childData", "skinBoneTransformIndices"]) {
+        assert.deepEqual(Array.from(q[key]), Array.from(p[key]), `${name}.${key}`);
+      }
+      assert.equal(q.centerTransformIndex, p.centerTransformIndex);
+      assert.deepEqual(q.baseLine, { flags: p.baseLine.flags, start: p.baseLine.start, count: p.baseLine.count, data: p.baseLine.data }, `${name}.baseLine`);
+      assert.deepEqual(Array.from(b.build.vertexToVertex.index), b64Ints(pm.vertexToVertexIndexArray, 4), `${name} vertexToVertex`);
+      assert.deepEqual(q.boneWeights.map((w) => w.i.join()), p.boneWeights.map((w) => w.i.join()), `${name} bone weight indices`);
+      assert.deepEqual(Array.from(b.distance.data), Array.from(def.distance.data), `${name} distance`);
+      assert.equal(!!b.bending, !!def.bending, `${name} bending`);
+      if (def.bending) assert.deepEqual(b.bending.pairs.map(String), def.bending.pairs.map(String), `${name} bending pairs`);
+      const close = (a, c, tol, label) => a.forEach((v, i) => v.forEach((x, j) => assert.ok(Math.abs(x - c[i][j]) <= tol, `${name}.${label}[${i}]`)));
+      close(q.localPositions, p.localPositions, 1e-6, "localPositions");
+      close(q.boneWeights.map((w) => w.w), p.boneWeights.map((w) => w.w), 1e-6, "boneWeights");
+      close(q.skinBoneBindPoses, p.skinBoneBindPoses, 1e-5, "skinBoneBindPoses");
+      q.localNormals.forEach((n, i) => assert.ok(angleDeg(n, p.localNormals[i]) < 0.02, `${name} normal ${i}`));
+      const bb = pm.boundingBox;
+      close([b.build.boundingBox.min, b.build.boundingBox.max], [[bb.Min.x, bb.Min.y, bb.Min.z], [bb.Max.x, bb.Max.y, bb.Max.z]], 1e-6, "boundingBox");
+      // render vertex -> proxy mapping
+      const pmap = def.mappings[0], qmap = b.mappings[0];
+      assert.deepEqual(qmap.referenceIndices, pmap.referenceIndices, `${name} mapping vertices (selection)`);
+      assert.deepEqual(qmap.attr, pmap.attr, `${name} mapping attributes`);
+      assert.deepEqual(qmap.boneWeights.map((w) => w.i.join()), pmap.boneWeights.map((w) => w.i.join()), `${name} mapping proxy vertices`);
+      close(qmap.boneWeights.map((w) => w.w), pmap.boneWeights.map((w) => w.w), 1e-5, "mapping weights");
+      close(qmap.localPositions, pmap.localPositions, 1e-6, "mapping localPositions");
+      close([qmap.toProxyMatrix], [pmap.toProxyMatrix], 1e-6, "toProxyMatrix");
+      assert.equal(qmap.centerTransformId, pmap.centerTransformId);
+      checked++;
+    });
+  }
+  assert.equal(checked, 2);
+});
+
+test("MagicaCloth2 MeshCloths without PreBuild data are built from the original mesh and start at the base pose", () => {
+  for (const source of meshFixtures()) {
+    for (const c of source.components) if (c.class === "MagicaCloth") delete c.fields.serializeData2.preBuildData;
+    const h = new Hierarchy(source.transforms), world = hierarchyWorld(h);
+    const def = decodeMagicaCloth2(source).cloths.find((d) => d.clothType === 0);
+    assert.equal(def.runtimeBuild, true, def.error);
+    const team = new MagicaClothTeam(def);
+    const out = team.frame(1 / 60, world);
+    const m = out.meshes[0], center = world(m.mapping.centerTransformId);
+    let max = 0, written = 0;
+    m.positions.forEach((p, k) => { if (p) { written++; max = Math.max(max, dist(p, mPoint(center.matrix, m.mapping.localPositions[k]))); } });
+    assert.ok(written > 0 && max < 1e-5, `render vertices at the base pose: ${max} over ${written}`);
+    const pivot = team.proxy.transformIds[team.proxy.skinBoneTransformIndices[0]];
+    const rest = h.localRot.get(pivot);
+    for (let f = 0; f < 120; f++) {
+      h.setLocal(pivot, { rot: unitQ([rest[0], rest[1] + Math.sin(f / 10) * 0.2, rest[2], rest[3]]) });
+      team.frame(1 / 60, world);
+      assert.ok(finite(team.state.positions), `${def.transformId} frame ${f}`);
+    }
+  }
 });
 
 test("MagicaCloth2 inertia anchor: moving the whole character (avatar root) adds no cloth inertia", () => {
