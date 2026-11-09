@@ -64,6 +64,46 @@
 
 `radius` 是布面的碰撞间隙，不等于来源资产代理粒子的半径。回正、阻尼及外力同样是通用调节量；伸展、弯曲约束的具体构造和迭代次数由求解器决定，不属于本格式。
 
+### 来源原版物理 `source`（可选）
+
+上面的字段是与求解器无关的通用描述。`source` 保存来源游戏**原样的**物理组件数据，并配套原算法求解器。凡是 `source` 驱动的节点，不得再出现在 `springs` 中。
+
+#### `source.unitySpringBone`：UnityChan SpringBone
+
+用于莲之空等使用 UnityChan SpringBone（Unity.Animations.SpringBones）的模型。求解器是 `src/unity-springbone.js`：逐函数对照游戏代码移植，与参考实现逐帧一致。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `transforms` | object[] | 求解涉及的 Unity Transform 及其所有祖先 |
+| `components` | object[] | `SpringManager`、`SpringBone`、`SpringBonePivot`、`SpringSphereCollider`、`SpringCapsuleCollider`、`SpringPanelCollider` 组件 |
+
+每个 `transforms[]` 项：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `id` | string | Transform 在来源资产里的 path id（十进制字符串；64 位整数不能存成 JSON number） |
+| `name` | string | Transform 名，仅供调试 |
+| `parentId` | string \| null | 父 Transform 的 `id` |
+| `localPosition` / `localRotation` / `localScale` | number[3] / number[4] / number[3] | Unity 局部变换（左手系，四元数 x,y,z,w），**必须与 GLB 的静止姿态是同一个姿态** |
+| `node` | integer \| null | 对应的当前组件 GLB 节点索引；`null` 表示 GLB 里没有这个节点（例如被省略的 pivot、碰撞体挂点），求解器按 Unity 静止变换补出 |
+
+每个 `components[]` 项：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `class` | string | 组件类名 |
+| `transformId` | string | 所在 Transform 的 `id` |
+| `fields` | object | 组件序列化字段原样保留（`stiffnessForce`、`dragForce`、`springForce`、`angularStiffness`、`yAngleLimits`、`zAngleLimits`、`radius`、碰撞体引用等）；对其他组件的引用写成 `{ "transformId": id }` |
+
+运行时按静止姿态拟合 Unity 与 GLB 的关系：X 镜像、旋转、等比缩放、平移，每个节点再加一个常量静止朝向偏移，所以归一化过的骨架也能使用。
+
+运行语义与游戏一致：
+- 每个 60 fps 固定步执行一次所有 SpringManager 的 LateUpdate；积分步长固定为 `1 / simulationFrameRate`，不随帧间隔变化；
+- 嵌套的两个 SpringManager 会把同一根骨各模拟一次；
+- `m_Enabled = 0` 的 SpringBone 不被模拟，继续跟随动画。
+
+重置（载入、切换动作、瞬移、重新启用）时，所有骨回到初始局部旋转、速度清零，再按 `reset` 的预热步数稳定。
+
 ## 2. 运行语义
 
 物理在动作及 Behavior `LateUpdate` 之后、`PostPhysics` 与绘制之前更新。动作/Behavior 的当帧结果是参考姿态；运行时不得把上一帧物理修改误当成新的动画输入。摆动骨只修改声明节点的旋转，保持骨段长度；布面在骨骼更新后求解网格位置。不改 Humanoid 动作、参考骨架或逆绑定矩阵。物理后的 Behavior 若修正了辅助骨姿态，求解状态应同步到修正结果，且仍保留动画参考姿态。
