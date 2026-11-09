@@ -76,24 +76,26 @@ export function validatePhysics(value, source = "physics") {
   }
   if (value.source !== undefined) {
     if (!object(value.source)) fail("source 必须是对象");
-    const sb = value.source.unitySpringBone;
-    if (sb !== undefined) {
-      if (!object(sb) || !Array.isArray(sb.transforms) || !Array.isArray(sb.components)) fail("unitySpringBone 需要 transforms 和 components 数组");
+    // verbatim source components on a Unity transform table (see docs/model_physics_spec.md)
+    const sourceTable = (label, data) => {
+      if (!object(data) || !Array.isArray(data.transforms) || !Array.isArray(data.components)) fail(`${label} 需要 transforms 和 components 数组`);
       const ids = new Set();
       const quat = (v) => Array.isArray(v) && v.length === 4 && v.every(Number.isFinite);
-      for (const t of sb.transforms) {
+      for (const t of data.transforms) {
         if (!object(t) || typeof t.id !== "string" || typeof t.name !== "string"
           || !(t.parentId === null || typeof t.parentId === "string")
           || !xyz(t.localPosition) || !quat(t.localRotation) || !xyz(t.localScale)
-          || !(t.node === undefined || t.node === null || index(t.node))) fail("unitySpringBone transform 无效");
-        if (ids.has(t.id)) fail(`unitySpringBone transform ${t.id} 重复`);
+          || !(t.node === undefined || t.node === null || index(t.node))) fail(`${label} transform 无效`);
+        if (ids.has(t.id)) fail(`${label} transform ${t.id} 重复`);
         ids.add(t.id);
       }
-      for (const t of sb.transforms) if (t.parentId !== null && !ids.has(t.parentId)) fail(`unitySpringBone transform ${t.id} 的父节点不存在`);
-      for (const c of sb.components) {
-        if (!object(c) || typeof c.class !== "string" || !ids.has(c.transformId) || !object(c.fields)) fail("unitySpringBone component 无效");
+      for (const t of data.transforms) if (t.parentId !== null && !ids.has(t.parentId)) fail(`${label} transform ${t.id} 的父节点不存在`);
+      for (const c of data.components) {
+        if (!object(c) || typeof c.class !== "string" || !ids.has(c.transformId) || !object(c.fields)) fail(`${label} component 无效`);
       }
-    }
+    };
+    if (value.source.unitySpringBone !== undefined) sourceTable("unitySpringBone", value.source.unitySpringBone);
+    if (value.source.magicaCloth2 !== undefined) sourceTable("magicaCloth2", value.source.magicaCloth2);
   }
 }
 

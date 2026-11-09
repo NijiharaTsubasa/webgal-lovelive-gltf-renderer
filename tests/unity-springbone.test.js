@@ -143,3 +143,18 @@ test("source SpringBone validation and node ownership", () => {
     source: { unitySpringBone: data } };
   assert.throws(() => new ModelPhysics(root, [{ physics, resolve: (index) => objects[index] }]), /重复控制节点/);
 });
+
+test("source MagicaCloth2 data validates like the SpringBone table and is otherwise inert for now", () => {
+  const data = {
+    transforms: [{ id: "1", name: "root", parentId: null, localPosition: [0, 0, 0], localRotation: [0, 0, 0, 1], localScale: [1, 1, 1], node: 0 },
+      { id: "2", name: "SP_Hair_01", parentId: "1", localPosition: [0, 1, 0], localRotation: [0, 0, 0, 1], localScale: [1, 1, 1], node: null }],
+    components: [{ class: "MagicaCloth", transformId: "1", fields: { serializeData: { clothType: 1, rootBones: [{ transformId: "2" }] } } }],
+  };
+  validatePhysics({ colliders: [], springs: [], source: { magicaCloth2: data } });
+  const root = new THREE.Group();
+  const model = new ModelPhysics(root, [{ physics: { colliders: [], springs: [], source: { magicaCloth2: data } }, resolve: () => root }]);
+  assert.equal(model.sourceSprings.length, 0);
+  const broken = structuredClone(data);
+  broken.components[0].transformId = "9";
+  assert.throws(() => validatePhysics({ colliders: [], springs: [], source: { magicaCloth2: broken } }), /magicaCloth2 component/);
+});

@@ -104,6 +104,37 @@
 
 重置（载入、切换动作、瞬移、重新启用）时，所有骨回到初始局部旋转、速度清零，再按 `reset` 的预热步数稳定。
 
+#### `source.magicaCloth2`：MagicaCloth2
+
+用于使用 MagicaCloth2 的模型（莲之空）。结构与 `unitySpringBone` 相同，也是 `transforms` 加 `components`。
+
+**`transforms`**：同上。BoneCloth 根骨以下的整条骨链都会列出。
+
+**`components`**：`MagicaCloth`、`MagicaCapsuleCollider`、`MagicaSphereCollider`、`MagicaPlaneCollider`，以及来源游戏加的 `ExtendClothSettings`。字段原样保留，只有以下几类改写。
+
+引用改写成对象：
+
+| 被引用的对象 | 写法 |
+|---|---|
+| Transform、GameObject | `{ "transformId" }` |
+| 组件 | `{ "transformId", "class" }` |
+| 蒙皮渲染器 | `{ "transformId", "class", "mesh": { "name", "node", "primitives" } }`，`node` 是 GLB 中对应的渲染节点索引 |
+| Mesh | `{ "mesh": { … } }` |
+| 资产（ScriptableObject） | `{ "asset", "class" }` |
+| 贴图 | `{ "texture" }` |
+
+原始字节数组写成 `{ "base64" }`：包括 `ExSimpleNativeArray` 的 `arrayBytes`，以及 VirtualMesh、RenderSetupData 的 `byte[]` 字段。内容是 MagicaCloth2 序列化时的小端结构体原样。
+
+浮点数是 float32 值的最短十进制写法，用 `Math.fround` 即可还原出精确的 float32。
+
+PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
+- `enabled`、`buildId`、`uniquePreBuildData` 照原样保留；
+- `preBuildScriptableObject` 写成 `{ "asset", "class" }`；
+- 该资产里 `buildId` 相同的那一项 SharePreBuildData 嵌入为 `sharePreBuildData`，包括代理网格、渲染映射、距离 / 弯曲 / 惯性约束数据；
+- `sharePreBuildData.renderSetupDataList` 省略了原始网格的整份拷贝（顶点、法线、切线、绑定矩阵、蒙皮权重），因为 GLB 里有这个网格，渲染顶点到代理点的映射和网格空间顶点在 `renderMeshList` 里。
+
+求解器正在移植。在求解器完成之前，转换器同时输出通用的 `springs` / `cloths` 作为后备，渲染器使用后备数据，`source.magicaCloth2` 只做校验。
+
 ## 2. 运行语义
 
 物理在动作及 Behavior `LateUpdate` 之后、`PostPhysics` 与绘制之前更新。动作/Behavior 的当帧结果是参考姿态；运行时不得把上一帧物理修改误当成新的动画输入。摆动骨只修改声明节点的旋转，保持骨段长度；布面在骨骼更新后求解网格位置。不改 Humanoid 动作、参考骨架或逆绑定矩阵。物理后的 Behavior 若修正了辅助骨姿态，求解状态应同步到修正结果，且仍保留动画参考姿态。
