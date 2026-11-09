@@ -1,7 +1,9 @@
 // MagicaCloth2 team (one cloth component): time accumulation, center / inertia, per-step team update.
 // Ported from Manager/Team/TeamManager.cs (AlwaysTeamUpdatePostJob, SimulationCalcCenterAndInertiaAndWind,
 // SimulationStepTeamUpdate, SimulationPostTeamUpdate), MagicaCloth2 v2.16.0, game version ~2.10.
-// Not ported (absent from the Link!Like! data, asserted where it matters): negative scale, anchors, wind zones /
+// Inertia anchor: the game sets every cloth's anchor to the avatar root at runtime (Inspix MagicaClothController.
+// SetAnchor), so with anchorInertia 0 the movement of the whole character adds no cloth inertia.
+// Not ported (absent from the Link!Like! data, asserted where it matters): negative scale, wind zones /
 // moving wind, synchronization, distance / camera culling, AnimatorLinkage update mode, external impact forces.
 import * as M from "./math.js";
 
@@ -31,8 +33,20 @@ export function createTeam(proxy, params, inertiaInit) {
       smoothingVelocity: [0, 0, 0], frameMovingSpeed: 0, frameMovingDirection: [0, 0, 0], frameLocalPosition: [0, 0, 0],
       stepVector: [0, 0, 0], stepRotation: M.IDENTITY.slice(), stepMoveInertiaRatio: 0, stepRotationInertiaRatio: 0,
       inertiaVector: [0, 0, 0], inertiaRotation: M.IDENTITY.slice(), angularVelocity: 0, rotationAxis: [0, 0, 0],
+      anchorPosition: [0, 0, 0], anchorRotation: M.IDENTITY.slice(), oldAnchorPosition: [0, 0, 0], oldAnchorRotation: M.IDENTITY.slice(),
+      anchorComponentLocalPosition: [0, 0, 0],
     },
+    anchor: false, anchorReset: false,
   };
+}
+
+/** AlwaysTeamUpdatePostJob, anchor part: the anchor transform's world pose this frame, or null for none. */
+export function teamAnchor(team, anchor) {
+  const now = !!anchor;
+  team.anchorReset = team.anchor !== now;
+  team.anchor = now;
+  team.center.anchorPosition = now ? anchor.position.slice() : [0, 0, 0];
+  team.center.anchorRotation = now ? anchor.rotation.slice() : M.IDENTITY.slice();
 }
 
 /** AlwaysTeamUpdatePostJob, time part: how many simulation steps this frame. */
@@ -97,7 +111,23 @@ export function teamCenterAndInertia(team, simulationDeltaTime, component, fixed
   }
   const wtol = M.worldToLocalMatrix(centerWorldPos, centerWorldRot, componentWorldScl);
 
-  // (anchor: not used by the data)
+  // anchor: the component movement explained by the anchor's own movement is cancelled (1 - anchorInertia)
+  let anchorDeltaVector = [0, 0, 0], anchorDeltaRotation = M.IDENTITY.slice();
+  if (team.anchorReset || team.reset) {
+    c.oldAnchorPosition = c.anchorPosition.slice();
+    c.oldAnchorRotation = c.anchorRotation.slice();
+    c.anchorComponentLocalPosition = M.inverseTransformPointTRS(componentWorldPos, c.anchorPosition, c.anchorRotation, [1, 1, 1]);
+  }
+  if (team.anchor) {
+    const anchorCenterPosition = M.transformPointTRS(c.anchorComponentLocalPosition, c.anchorPosition, c.anchorRotation, [1, 1, 1]);
+    const ratio = 1 - p.anchorInertia;
+    anchorDeltaVector = M.mul(M.sub(anchorCenterPosition, oldComponentWorldPosition), ratio);
+    anchorDeltaRotation = M.slerp(M.IDENTITY, M.fromToRotationQ(c.oldAnchorRotation, c.anchorRotation), ratio);
+    oldComponentWorldPosition = M.add(oldComponentWorldPosition, anchorDeltaVector);
+    oldComponentWorldRotation = M.qmul(anchorDeltaRotation, oldComponentWorldRotation);
+    team.inertiaShift = true;
+  }
+
   const frameDeltaVector = M.sub(componentWorldPos, oldComponentWorldPosition);
   const frameDeltaAngle = M.angleQ(oldComponentWorldRotation, componentWorldRot);
 
@@ -200,7 +230,9 @@ export function teamCenterAndInertia(team, simulationDeltaTime, component, fixed
     if (team.inertiaShift) {
       c.frameComponentShiftVector = M.mul(c.frameComponentShiftVector, moveShiftRatio);
       c.frameComponentShiftRotation = M.slerp(M.IDENTITY, c.frameComponentShiftRotation, rotationShiftRatio);
-      c.frameComponentShiftVector = M.add(c.frameComponentShiftVector, smoothDeltaVector);   // (no anchor delta)
+      c.frameComponentShiftVector = M.add(c.frameComponentShiftVector, anchorDeltaVector);
+      c.frameComponentShiftRotation = M.qmul(anchorDeltaRotation, c.frameComponentShiftRotation);
+      c.frameComponentShiftVector = M.add(c.frameComponentShiftVector, smoothDeltaVector);
       c.oldFrameWorldPosition = M.shiftPosition(c.oldFrameWorldPosition, c.oldComponentWorldPosition, c.frameComponentShiftVector, c.frameComponentShiftRotation);
       c.oldFrameWorldRotation = M.qmul(c.frameComponentShiftRotation, c.oldFrameWorldRotation);
       c.nowWorldPosition = M.shiftPosition(c.nowWorldPosition, c.oldComponentWorldPosition, c.frameComponentShiftVector, c.frameComponentShiftRotation);
@@ -291,6 +323,9 @@ export function teamPost(team) {
     c.oldFrameWorldScale = c.frameWorldScale.slice();
     team.skipCount = 0;
   }
+  c.oldAnchorPosition = c.anchorPosition.slice();
+  c.oldAnchorRotation = c.anchorRotation.slice();
+  c.anchorComponentLocalPosition = M.inverseTransformPointTRS(c.componentWorldPosition, c.anchorPosition, c.anchorRotation, [1, 1, 1]);
   team.reset = false;
   team.timeReset = false;
   team.running = false;

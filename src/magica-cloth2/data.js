@@ -1,7 +1,8 @@
 // Decode physics.source.magicaCloth2 (converter: verbatim MagicaCloth2 components + PreBuild data) into solver
 // inputs: ClothParameters (Cloth/ClothSerializeDataFunction.cs GetClothParameters) and the prebuilt proxy /
-// mapping meshes (VirtualMesh/Function/VirtualMeshSerialization.cs).  Only PreBuild cloths can be simulated:
-// building a proxy mesh at runtime (selection + reduction) is not ported.
+// mapping meshes (VirtualMesh/Function/VirtualMeshSerialization.cs).  BoneCloths without PreBuild data are built
+// at runtime (build.js); MeshCloths without PreBuild data are not (selection + reduction are not ported).
+import { buildBoneCloth, prefabHierarchy } from "./build.js";
 const b64 = (s) => {
   if (typeof Buffer !== "undefined") { const b = Buffer.from(s, "base64"); return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); }
   const bin = atob(s), out = new Uint8Array(bin.length);
@@ -222,7 +223,7 @@ function colliderDefinition(component) {
 
 /**
  * -> { transforms, cloths: [{ transformId, enabled, params, proxy, distance, bending, initLocalGravityDirection,
- *       colliders: [def], mappings: [mapping], prebuilt }] }
+ *       colliders: [def], mappings: [mapping], prebuilt, runtimeBuild }] }
  */
 export function decodeMagicaCloth2(source) {
   const colliders = new Map();
@@ -230,6 +231,7 @@ export function decodeMagicaCloth2(source) {
     if (COLLIDER_CLASSES.has(c.class)) colliders.set(`${c.transformId}/${c.class}`, colliderDefinition(c));
   }
   const cloths = [];
+  let hierarchy = null;
   for (const c of source.components) {
     if (c.class !== "MagicaCloth") continue;
     const pb = c.fields.serializeData2?.preBuildData;
@@ -249,6 +251,10 @@ export function decodeMagicaCloth2(source) {
         cloth.initLocalGravityDirection = vec3(share.inertiaConstraintData.initLocalGravityDirection);
         cloth.mappings = (share.renderMeshList ?? []).map((m, i) =>
           mappingMesh(m, unique.renderMeshList[i], unique.renderSetupDataList[i]));
+      } else if (sd.clothType === 1) {   // BoneCloth without PreBuild: build the proxy like the game does at Start
+        hierarchy ??= prefabHierarchy(source.transforms);
+        const { build, ...built } = buildBoneCloth(source.transforms, { transformId: c.transformId, ...c.fields }, cloth.params, hierarchy);
+        Object.assign(cloth, built, { runtimeBuild: true, siblingOrder: build.siblingOrder });
       }
     } catch (error) {
       cloth.prebuilt = false;

@@ -8,6 +8,7 @@ import { MagicaClothTeam, simulationPower } from "../src/magica-cloth2/cloth.js"
 import { createTeam, teamFrameTime } from "../src/magica-cloth2/team.js";
 import { solveTriangleBending } from "../src/magica-cloth2/constraints.js";
 import { MagicaClothBinding } from "../src/magica-cloth2/three-binding.js";
+import { buildBoneCloth } from "../src/magica-cloth2/build.js";
 import { ModelPhysics } from "../src/model-physics.js";
 
 // converter physics.source.magicaCloth2 of 3d_costume_1001103101 (Kaho), trimmed to the skirt (MeshCloth, edge
@@ -120,10 +121,9 @@ test("MagicaCloth2 teams start at the base pose and stay finite and bounded unde
     if (out.bones) {
       out.bones.forEach((b, v) => {
         if (!b?.localRotation) return;
-        const q = new THREE.Quaternion(...b.localRotation), r = new THREE.Quaternion(...restLocal.get(t.proxy.transformIds[v]));
-        // not exact: line / triangle rotations use the PreBuild-time local frames (vertexLocalRotations,
-        // normalAdjustmentRotations), a few hundredths of a degree off the exported rest pose
-        assert.ok(q.angleTo(r) < 0.1 * Math.PI / 180, `${t.def.buildId} bone ${v}: ${q.angleTo(r)}`);
+        // normalized first: float32 quaternions are ~1e-7 off unit length, which angleTo turns into ~0.03 deg
+        const q = new THREE.Quaternion(...b.localRotation).normalize(), r = new THREE.Quaternion(...restLocal.get(t.proxy.transformIds[v])).normalize();
+        assert.ok(q.angleTo(r) < 1e-3 * Math.PI / 180, `${t.def.buildId} bone ${v}: ${q.angleTo(r)}`);
       });
     } else {
       const m = out.meshes[0], center = world(m.mapping.centerTransformId);
@@ -252,4 +252,115 @@ test("ModelPhysics runs MagicaCloth2 after the other physics and drops the gener
   root.updateMatrixWorld(true);
   assert.ok(target.getWorldPosition(new THREE.Vector3()).distanceTo(rest) < 1e-9, "disabled physics restores the bone");
   model.destroy();
+});
+
+// ------------------------------------------------------------------ runtime BoneCloth build (no PreBuild data)
+// 3d_costume_3020103101 trimmed to two BoneCloths with custom skinning: SleeveR (SequentialNonLoopMesh) and
+// SleeveRibbon (AutomaticMesh)
+const fixture2 = () => JSON.parse(readFileSync(new URL("./fixtures/magica-cloth2/3d_costume_3020103101.json", import.meta.url), "utf8"));
+const b64Ints = (f, size) => {
+  if (Array.isArray(f)) return f.flatMap((k) => (typeof k === "object" ? [k.x, k.y] : [k]));
+  const b = Buffer.from(f.base64, "base64"), v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return Array.from({ length: b.byteLength / size }, (_, i) => (size === 2 ? v.getUint16(i * 2, true) : v.getUint32(i * 4, true)));
+};
+const angleDeg = (a, b) => Math.acos(Math.min(1, Math.max(-1, a.reduce((s, x, k) => s + x * b[k], 0) / (Math.hypot(...a) * Math.hypot(...b))))) * 180 / Math.PI;
+const unitQ = (q) => { const n = Math.hypot(...q); return q.map((x) => x / n); };
+
+test("MagicaCloth2 runtime BoneCloth build reproduces the game's PreBuild data", () => {
+  let checked = 0;
+  for (const source of [fixture(), fixture2()]) {
+    const decoded = decodeMagicaCloth2(source);
+    const raws = source.components.filter((c) => c.class === "MagicaCloth");
+    decoded.cloths.forEach((def, k) => {
+      if (def.clothType !== 1) return;
+      const raw = raws[k], pm = raw.fields.serializeData2.preBuildData.sharePreBuildData.proxyMesh;
+      const b = buildBoneCloth(source.transforms, { transformId: raw.transformId, ...raw.fields }, def.params);
+      const p = def.proxy, q = b.proxy, name = def.buildId;
+      assert.ok(b.build.siblingOrder, `${name}: transform table carries the child order`);
+      // topology and every order that comes from C# / Unity.Collections containers
+      for (const key of ["transformIds", "attr", "triangles", "lines", "edges", "parent", "root", "centerFixedList",
+        "childIndex", "childData", "skinBoneTransformIndices"]) {
+        assert.deepEqual(Array.from(q[key]), Array.from(p[key]), `${name}.${key}`);
+      }
+      assert.deepEqual(q.baseLine, { flags: p.baseLine.flags, start: p.baseLine.start, count: p.baseLine.count, data: p.baseLine.data }, `${name}.baseLine`);
+      assert.deepEqual(q.vertexToTriangles.map(String), p.vertexToTriangles.map(String), `${name}.vertexToTriangles`);
+      assert.deepEqual(Array.from(b.build.vertexToVertex.index), b64Ints(pm.vertexToVertexIndexArray, 4), `${name} vertexToVertex index`);
+      assert.deepEqual(b.build.vertexToVertex.data, b64Ints(pm.vertexToVertexDataArray, 2), `${name} vertexToVertex data`);
+      assert.deepEqual(b.build.edgeToTriangles.flatMap(([x, y]) => [x, y]), b64Ints(pm.edgeToTrianglesKeys, 4), `${name} edgeToTriangles keys`);
+      assert.deepEqual(Array.from(b.distance.index), Array.from(def.distance.index), `${name} distance index`);
+      assert.deepEqual(Array.from(b.distance.data), Array.from(def.distance.data), `${name} distance data`);
+      assert.equal(!!b.bending, !!def.bending, `${name} bending`);
+      if (def.bending) assert.deepEqual(b.bending.pairs.map(String), def.bending.pairs.map(String), `${name} bending pairs`);
+      assert.deepEqual(q.boneWeights.map((w) => w.i.join()), p.boneWeights.map((w) => w.i.join()), `${name} bone weight indices`);
+      // values: float32 rounding only
+      const close = (a, c, tol, label) => a.forEach((v, i) => v.forEach((x, j) => assert.ok(Math.abs(x - c[i][j]) <= tol, `${name}.${label}[${i}]`)));
+      close(q.localPositions, p.localPositions, 1e-6, "localPositions");
+      close(q.boneWeights.map((w) => w.w), p.boneWeights.map((w) => w.w), 1e-6, "boneWeights");
+      close(q.skinBoneBindPoses, p.skinBoneBindPoses, 1e-5, "skinBoneBindPoses");
+      close(q.vertexLocalPositions, p.vertexLocalPositions, 1e-6, "vertexLocalPositions");
+      q.localNormals.forEach((n, i) => assert.ok(angleDeg(n, p.localNormals[i]) < 1e-3, `${name} normal ${i}`));
+      q.localTangents.forEach((t, i) => assert.ok(angleDeg(t, p.localTangents[i]) < 1e-3, `${name} tangent ${i}`));
+      Array.from(b.distance.dist).forEach((d, i) => assert.ok(Math.abs(d - def.distance.dist[i]) < 1e-6, `${name} distance ${i}`));
+      if (def.bending) Array.from(b.bending.restAngleOrVolume).forEach((r, i) => assert.ok(Math.abs(r - def.bending.restAngleOrVolume[i]) < 1e-3, `${name} rest ${i}`));
+      b.initLocalGravityDirection.forEach((x, i) => assert.ok(Math.abs(x - def.initLocalGravityDirection[i]) < 1e-6, `${name} gravity`));
+      checked++;
+    });
+  }
+  assert.equal(checked, 4);   // BackHair, Necktie, SleeveR, SleeveRibbon
+});
+
+test("MagicaCloth2 BoneCloths without PreBuild data are built at decode time and start at the base pose", () => {
+  for (const source of [fixture(), fixture2()]) {
+    for (const c of source.components) if (c.class === "MagicaCloth" && c.fields.serializeData.clothType === 1) delete c.fields.serializeData2.preBuildData;
+    const decoded = decodeMagicaCloth2(source);
+    const h = new Hierarchy(source.transforms), world = hierarchyWorld(h);
+    for (const def of decoded.cloths.filter((d) => d.clothType === 1)) {
+      assert.equal(def.prebuilt, false);
+      assert.equal(def.runtimeBuild, true, def.error);
+      const team = new MagicaClothTeam(def);
+      const out = team.frame(1 / 60, world);
+      out.bones.forEach((b, v) => {
+        if (!b?.localRotation) return;
+        const id = team.proxy.transformIds[v];
+        const q = new THREE.Quaternion(...b.localRotation).normalize(), r = new THREE.Quaternion(...h.localRot.get(id)).normalize();
+        assert.ok(q.angleTo(r) < 1e-3 * Math.PI / 180, `${def.transformId} bone ${v}: ${q.angleTo(r)}`);
+        assert.ok(dist(b.localPosition, h.localPos.get(id)) < 1e-6, `${def.buildId} bone ${v} position`);
+      });
+      const pivot = team.proxy.transformIds[team.proxy.centerFixedList[0]];
+      for (let f = 0; f < 120; f++) {
+        h.setLocal(pivot, { rot: unitQ([0, Math.sin(f / 10) * 0.2, 0, 1]) });
+        team.frame(1 / 60, world);
+        assert.ok(finite(team.state.positions), `${def.buildId} frame ${f}`);
+      }
+    }
+  }
+  // MeshCloth without PreBuild data stays unsupported (reduction is not ported)
+  const source = fixture();
+  delete source.components.find((c) => c.class === "MagicaCloth" && c.fields.serializeData.clothType === 0).fields.serializeData2.preBuildData;
+  const skirt = decodeMagicaCloth2(source).cloths.find((d) => d.clothType === 0);
+  assert.throws(() => new MagicaClothTeam(skirt), /MeshCloth reduction is not ported/);
+});
+
+test("MagicaCloth2 inertia anchor: moving the whole character (avatar root) adds no cloth inertia", () => {
+  // skirt display positions per frame, mapped into the root's rest frame
+  const run = (move, anchored) => {
+    const source = fixture();
+    const h = new Hierarchy(source.transforms), world = hierarchyWorld(h);
+    const rootId = source.transforms.find((t) => t.parentId === null).id;
+    const restMatrix = new THREE.Matrix4().fromArray(world(rootId).matrix), rest = h.localPos.get(rootId).slice();
+    const team = new MagicaClothTeam(byBuild(decodeMagicaCloth2(source), "Skirt"), { anchorTransformId: anchored ? rootId : null });
+    const frames = [];
+    for (let f = 0; f < 180; f++) {
+      if (move) h.setLocal(rootId, { pos: [rest[0] + 0.3 * Math.sin(2 * Math.PI * f / 60), rest[1], rest[2] + 0.01 * f], rot: unitQ([0, Math.sin(f / 20) * 0.3, 0, 1]) });
+      team.frame(1 / 60, world);
+      const toRest = restMatrix.clone().multiply(new THREE.Matrix4().fromArray(world(rootId).matrix).invert());
+      frames.push(team.state.positions.map((p, v) => (team.state.attr[v] & 2 ? new THREE.Vector3(...p).applyMatrix4(toRest).toArray() : null)));
+    }
+    return frames;
+  };
+  const still = run(false, false);
+  const deviation = (frames) => Math.max(...frames.map((ps, f) => Math.max(...ps.map((p, v) => (p ? dist(p, still[f][v]) : 0)))));
+  const free = deviation(run(true, false)), anchored = deviation(run(true, true));
+  assert.ok(free > 0.05, `without the anchor the moving character swings the skirt (${free})`);
+  assert.ok(anchored < 1e-4, `anchored: the skirt moves as if the character stood still (${anchored})`);
 });

@@ -24,9 +24,13 @@ export class MagicaClothBinding {
     const h = this.h = new Hierarchy(source.transforms);
     this.teams = [];
     this.unsupported = [];
+    // inertia anchor: the game anchors every cloth to the avatar root; the prefab root moves rigidly with it
+    const anchorTransformId = source.transforms.find((t) => t.parentId === null || t.parentId === undefined)?.id ?? null;
     for (const def of this.decoded.cloths) {
       if (!def.enabled) continue;
-      try { this.teams.push(new MagicaClothTeam(def)); } catch (error) { this.unsupported.push({ buildId: def.buildId, reason: error.message }); }
+      try { this.teams.push(new MagicaClothTeam(def, { anchorTransformId })); } catch (error) {
+        this.unsupported.push({ buildId: def.buildId, transformId: def.transformId, reason: error.message });
+      }
     }
     const needed = new Set();
     const addChain = (id) => { for (let k = id; k !== null && k !== undefined && !needed.has(k); k = h.parent.get(k)) needed.add(k); };

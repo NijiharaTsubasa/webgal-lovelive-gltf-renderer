@@ -84,7 +84,9 @@
 | `id` | string | Transform 在来源资产里的 path id（十进制字符串；64 位整数不能存成 JSON number） |
 | `name` | string | Transform 名，仅供调试 |
 | `parentId` | string \| null | 父 Transform 的 `id` |
+| `siblingIndex` | integer \| null | 在父 Transform 子列表里的序号（`Transform.GetSiblingIndex`），根为 `null`；MagicaCloth2 运行时构建按它确定顶点顺序 |
 | `localPosition` / `localRotation` / `localScale` | number[3] / number[4] / number[3] | Unity 局部变换（左手系，四元数 x,y,z,w），**必须与 GLB 的静止姿态是同一个姿态** |
+| `prefabLocalPosition` / `prefabLocalRotation` / `prefabLocalScale` | 同上，可省略 | 预制体里序列化的局部变换，只在与上一行不同时给出（例如 GLB 静止姿态是烘焙出的中性姿态）。MagicaCloth2 运行时构建读的是游戏 Awake 时的姿态，也就是这一组 |
 | `node` | integer \| null | 对应的当前组件 GLB 节点索引；`null` 表示 GLB 里没有这个节点（例如被省略的 pivot、碰撞体挂点），求解器按 Unity 静止变换补出 |
 
 每个 `components[]` 项：
@@ -133,14 +135,21 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 - 该资产里 `buildId` 相同的那一项 SharePreBuildData 嵌入为 `sharePreBuildData`，包括代理网格、渲染映射、距离 / 弯曲 / 惯性约束数据；
 - `sharePreBuildData.renderSetupDataList` 省略了原始网格的整份拷贝（顶点、法线、切线、绑定矩阵、蒙皮权重），因为 GLB 里有这个网格，渲染顶点到代理点的映射和网格空间顶点在 `renderMeshList` 里。
 
-渲染器用移植的 MagicaCloth2 求解器（`src/magica-cloth2/`，按 v2.16.0 源码逐函数移植）模拟带 PreBuild 数据的布料，按游戏版本（约 2.10）和游戏设置运行：
+渲染器用移植的 MagicaCloth2 求解器（`src/magica-cloth2/`，按 v2.16.0 源码逐函数移植）模拟布料，按游戏版本（约 2.10）和游戏设置运行：
 - 每个渲染帧（1/60 s）在所有 LateUpdate 之后（SpringBone、辅助骨、`afterPhysics` 之后）运行一次；模拟频率 50 Hz，每帧最多 5 步（游戏的 `MagicaClothCalculate.SetSimulationSettings`）；
 - 显示位置预测不带 2.11.1 加入的离根距离限幅（`MaxDistanceRatioFutuerPrediction`）；
 - 帧开始时 BoneCloth 骨回到初始局部姿态（`RestoreTransform`），动作随后可以覆盖；移动骨写局部位置和旋转，固定骨写世界旋转；
 - MeshCloth 把映射网格的非固定顶点写回渲染网格：按当帧蒙皮矩阵反算到网格空间，显示出来正好是求解得到的世界位置，法线同步；
+- 惯性 anchor：游戏在运行时把每个布料的 anchor 设成角色根（`MagicaClothController.SetAnchor`，`anchorInertia` 全为 0），整个角色的移动不产生布料惯性。渲染器用 transform 表的根（预制体根，和角色根刚性相连）作 anchor；
+- 更新模式 Normal、Unscaled、AnimatorLinkage 都按 Normal 运行（渲染器没有 Unity 的时间缩放和 FixedUpdate）；
 - Unity 与 three.js 坐标的关系和 `unitySpringBone` 一样由静止姿态拟合。
 
-不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 数据（运行时构建代理网格未移植）、负缩放、anchor、自碰撞、非 Normal 更新模式、多 primitive 的渲染网格。
+代理网格的来源：
+- 有 PreBuild 数据时直接用；
+- 没有 PreBuild 的 BoneCloth 在解码时按游戏的运行时构建生成（`src/magica-cloth2/build.js`：RenderSetupData → ImportBoneType 的四种连接方式 → 去重三角形 → 选择数据 → ConvertProxyMesh → 距离 / 弯曲 / 惯性约束，包括自定义蒙皮），读预制体姿态（`prefabLocal*`）和子节点顺序（`siblingIndex`）。顺序取决于 C# HashSet 与 Unity.Collections 散列容器的遍历顺序，`native-hash.js` 照样复现；法线调整用游戏版本（2.13.0 之前）的算法，与 v2.16 源码不同；
+- 没有 PreBuild 的 MeshCloth 不模拟（选择与减面未移植）。
+
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
 
 转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 

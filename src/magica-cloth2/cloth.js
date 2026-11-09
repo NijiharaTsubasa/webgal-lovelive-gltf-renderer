@@ -1,7 +1,7 @@
 // One MagicaCloth2 component (team) per frame, in the order of SimulationManagerNormal.SimulationNormalJob.Execute
 // (v2.16.0) with the game's global settings: 50 Hz, at most 5 steps per frame (Inspix MagicaClothCalculate).
 import * as M from "./math.js";
-import { createTeam, teamFrameTime, teamCenterAndInertia, teamStep, teamPost } from "./team.js";
+import { createTeam, teamFrameTime, teamAnchor, teamCenterAndInertia, teamStep, teamPost } from "./team.js";
 import {
   preTeamUpdate, stepUpdateParticles, stepUpdateBaseLinePose, solveTether, solveDistance, solveAngle,
   clearTempBuffer, stepPostTeam, calcDisplayPosition,
@@ -38,14 +38,23 @@ function particleState(proxy, def) {
 }
 
 export class MagicaClothTeam {
-  /** def: one entry of decodeMagicaCloth2(...).cloths (must be prebuilt) */
-  constructor(def, { frequency = GAME_SIMULATION_FREQUENCY, maxCount = GAME_MAX_SIMULATION_COUNT_PER_FRAME } = {}) {
+  /**
+   * def: one entry of decodeMagicaCloth2(...).cloths with a proxy mesh (PreBuild data or a runtime BoneCloth build).
+   * anchorTransformId: the inertia anchor.  The game anchors every cloth to the avatar root at runtime
+   * (Inspix MagicaClothController.SetAnchor); the prefab root moves rigidly with it.
+   */
+  constructor(def, { frequency = GAME_SIMULATION_FREQUENCY, maxCount = GAME_MAX_SIMULATION_COUNT_PER_FRAME, anchorTransformId = null } = {}) {
     if (def.error) throw new Error(def.error);
-    if (!def.prebuilt) throw new Error(`MagicaCloth2 ${def.buildId ?? def.transformId}: no PreBuild data (runtime proxy build is not ported)`);
-    if (def.params.inertiaConstraint.hasAnchor) throw new Error("MagicaCloth2: inertia anchors are not supported");
+    if (!def.prebuilt && !def.runtimeBuild) {
+      throw new Error(`MagicaCloth2 ${def.buildId ?? def.transformId}: no PreBuild data and no runtime build (${def.clothType === 0 ? "MeshCloth reduction is not ported" : "unsupported"})`);
+    }
+    if (def.params.inertiaConstraint.hasAnchor) throw new Error("MagicaCloth2: serialized inertia anchors are not supported");
     if (def.params.selfCollisionMode) throw new Error("MagicaCloth2: self collision is not supported");
-    if (def.updateMode !== 0) throw new Error(`MagicaCloth2: updateMode ${def.updateMode} is not supported`);
+    // Normal (0); Unscaled (2) only swaps in Time.unscaledDeltaTime and AnimatorLinkage (10) follows the Animator's
+    // update mode: without a Unity time scale or FixedUpdate both run like Normal here.  UnityPhysics (1) is unused.
+    if (![0, 2, 10].includes(def.updateMode)) throw new Error(`MagicaCloth2: updateMode ${def.updateMode} is not supported`);
     this.def = def;
+    this.anchorTransformId = anchorTransformId;
     this.proxy = def.proxy;
     this.params = { ...def.params, worldGravityDirection: M.normalizesafe(def.params.worldGravityDirection) };
     this.simulationDeltaTime = 1 / frequency;
@@ -64,6 +73,7 @@ export class MagicaClothTeam {
     const ids = new Set(this.proxy.transformIds.filter((id) => id !== null));
     for (const c of this.def.colliders) ids.add(c.transformId);
     for (const m of this.def.mappings) if (m.centerTransformId) ids.add(m.centerTransformId);
+    if (this.anchorTransformId !== null) ids.add(this.anchorTransformId);
     return [...ids];
   }
 
@@ -83,6 +93,7 @@ export class MagicaClothTeam {
     const { team, state: s, proxy, params, colliders } = this;
     const simDT = this.simulationDeltaTime;
     teamFrameTime(team, deltaTime, simDT, this.maxCount);
+    teamAnchor(team, this.anchorTransformId !== null ? world(this.anchorTransformId) : null);
 
     const proxyWorld = proxy.transformIds.map((id) => world(id));
     preProxyMeshUpdate(s, proxy, proxyWorld.map((w) => w.matrix));
