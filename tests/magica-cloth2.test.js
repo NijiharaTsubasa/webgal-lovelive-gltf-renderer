@@ -10,6 +10,7 @@ import { solveTriangleBending } from "../src/magica-cloth2/constraints.js";
 import { MagicaClothBinding } from "../src/magica-cloth2/three-binding.js";
 import { buildBoneCloth } from "../src/magica-cloth2/build.js";
 import { buildMeshCloth } from "../src/magica-cloth2/build-mesh.js";
+import { prebuildMagicaCloth2 } from "../src/magica-cloth2/prebuild.js";
 import { ModelPhysics } from "../src/model-physics.js";
 
 // converter physics.source.magicaCloth2 of 3d_costume_1001103101 (Kaho), trimmed to the skirt (MeshCloth, edge
@@ -408,6 +409,45 @@ test("MagicaCloth2 MeshCloths without PreBuild data are built from the original 
       team.frame(1 / 60, world);
       assert.ok(finite(team.state.positions), `${def.transformId} frame ${f}`);
     }
+  }
+});
+
+// ------------------------------------------------------------------ conversion-time prebuild (prebuild.js)
+const builtMeshes = (d) => JSON.parse(JSON.stringify({ proxy: d.proxy, mappings: d.mappings, distance: d.distance, bending: d.bending, g: d.initLocalGravityDirection },
+  (k, v) => (ArrayBuffer.isView(v) ? Array.from(v) : v)));
+test("MagicaCloth2 prebuild: runtimePreBuild decodes to exactly the runtime build and replaces meshData", () => {
+  for (const source of [fixture(), fixture2(), ...meshFixtures()]) {
+    // keep the game PreBuild of the first of several cloths (and of MeshCloths without meshData), build the rest
+    const cloths = source.components.filter((c) => c.class === "MagicaCloth");
+    const expected = cloths.map((c, i) => {
+      const sd = c.fields.serializeData;
+      if ((i === 0 && cloths.length > 1) || (sd.clothType === 0 && !sd.sourceRenderers[0].meshData)) return "prebuilt";
+      delete c.fields.serializeData2.preBuildData;
+      return "built";
+    });
+    assert.ok(expected.includes("built"));
+    const runtime = decodeMagicaCloth2(structuredClone(source));
+    const report = prebuildMagicaCloth2(source);
+    assert.deepEqual(report.map((r) => r.status), expected, JSON.stringify(report));
+    const converted = JSON.parse(JSON.stringify(source));
+    const check = (data) => {
+      const decoded = decodeMagicaCloth2(data);
+      decoded.cloths.forEach((def, i) => {
+        assert.equal(def.error, undefined);
+        assert.equal(def.prebuilt, expected[i] === "prebuilt");
+        assert.equal(!!def.runtimePreBuild, expected[i] === "built");
+        assert.deepEqual(builtMeshes(def), builtMeshes(runtime.cloths[i]), `cloth ${i}`);
+      });
+    };
+    check(converted);
+    converted.components.filter((c) => c.class === "MagicaCloth").forEach((c, i) => {
+      assert.equal(!!c.runtimePreBuild, expected[i] === "built");
+      if (expected[i] === "built") for (const r of c.fields.serializeData.sourceRenderers ?? []) assert.equal(r?.meshData, undefined);
+    });
+    // running it again: BoneCloths are rebuilt, MeshCloths (meshData gone) keep their result
+    const again = prebuildMagicaCloth2(converted);
+    assert.deepEqual(again.map((r) => r.status), cloths.map((c, i) => (expected[i] !== "built" ? expected[i] : c.fields.serializeData.clothType === 1 ? "built" : "kept")));
+    check(JSON.parse(JSON.stringify(converted)));
   }
 });
 

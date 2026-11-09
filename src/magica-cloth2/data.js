@@ -2,7 +2,8 @@
 // inputs: ClothParameters (Cloth/ClothSerializeDataFunction.cs GetClothParameters) and the prebuilt proxy /
 // mapping meshes (VirtualMesh/Function/VirtualMeshSerialization.cs).  Cloths without PreBuild data are built at
 // runtime like the game does: BoneCloth from the transform hierarchy (build.js), MeshCloth from the original Unity
-// mesh the converter exports as sourceRenderers[i].meshData (build-mesh.js).
+// mesh the converter exports as sourceRenderers[i].meshData (build-mesh.js), unless the conversion already ran that
+// build (prebuild.js): its results come as component.runtimePreBuild in the PreBuild encoding.
 import { buildBoneCloth, prefabHierarchy } from "./build.js";
 import { buildMeshCloth } from "./build-mesh.js";
 const b64 = (s) => {
@@ -38,6 +39,7 @@ const count = (bytes, size) => Math.floor(bytes.byteLength / size);
 const exF = (ex, width) => f32(exBytes(ex), ex.count, width);
 const exS = (ex, kind) => scalars(exBytes(ex), ex.count, kind);
 const rawF = (f, width) => { const b = rawBytes(f); return f32(b, count(b, width * 4), width); };
+export const RUNTIME_PREBUILD_VERSION = 1;   // component.runtimePreBuild.version written by prebuild.js
 const rawS = (f, kind) => { const b = rawBytes(f); return scalars(b, count(b, { u8: 1, i8: 1, u16: 2, i32: 4, u32: 4, f32: 4 }[kind]), kind); };
 // VirtualMeshBoneWeight: float4 weights, int4 boneIndices (32 bytes)
 function boneWeights(ex) {
@@ -186,11 +188,14 @@ function mappingMesh(m, unique, setup) {
   };
 }
 
+// a number array in the game data (JSON numbers) or in runtimePreBuild (raw little-endian bytes)
+const numbers = (x, kind) => (x?.base64 !== undefined ? rawS(x, kind) : x);
 function constraints(share) {
   const d = share.distanceConstraintData, b = share.bendingConstraintData;
   const out = { distance: null, bending: null };
-  if (d && d.indexArray?.length) {
-    out.distance = { index: Uint32Array.from(d.indexArray), data: Uint16Array.from(d.dataArray), dist: Float32Array.from(d.distanceArray) };
+  const index = d && numbers(d.indexArray, "u32");
+  if (index?.length) {
+    out.distance = { index: Uint32Array.from(index), data: Uint16Array.from(numbers(d.dataArray, "u16")), dist: Float32Array.from(numbers(d.distanceArray, "f32")) };
   }
   if (b && b.trianglePairArray) {
     let pairs;
@@ -201,9 +206,20 @@ function constraints(share) {
       if (b.trianglePairArray.some((x) => x > Number.MAX_SAFE_INTEGER)) throw new Error("MagicaCloth2: trianglePairArray lost precision in JSON");
       pairs = b.trianglePairArray.map((x) => { const big = BigInt(x); return [48n, 32n, 16n, 0n].map((s) => Number((big >> s) & 0xffffn)); });
     }
-    if (pairs.length) out.bending = { pairs, restAngleOrVolume: Float32Array.from(b.restAngleOrVolumeArray), signOrVolume: Int8Array.from(b.signOrVolumeArray) };
+    if (pairs.length) {
+      out.bending = { pairs, restAngleOrVolume: Float32Array.from(numbers(b.restAngleOrVolumeArray, "f32")), signOrVolume: Int8Array.from(numbers(b.signOrVolumeArray, "i8")) };
+    }
   }
   return out;
+}
+
+function preBuildMeshes(share, unique) {
+  return {
+    proxy: proxyMesh(share, unique),
+    ...constraints(share),
+    initLocalGravityDirection: vec3(share.inertiaConstraintData.initLocalGravityDirection),
+    mappings: (share.renderMeshList ?? []).map((m, i) => mappingMesh(m, unique.renderMeshList[i], unique.renderSetupDataList[i])),
+  };
 }
 
 // ------------------------------------------------------------------ colliders
@@ -225,7 +241,9 @@ function colliderDefinition(component) {
 
 /**
  * -> { transforms, cloths: [{ transformId, enabled, params, proxy, distance, bending, initLocalGravityDirection,
- *       colliders: [def], mappings: [mapping], prebuilt, runtimeBuild }] }
+ *       colliders: [def], mappings: [mapping], prebuilt, runtimeBuild, runtimePreBuild }] }
+ * prebuilt: the game's PreBuild data; runtimeBuild: built like the game does at Start, during this decode or, with
+ * runtimePreBuild, at conversion time.
  */
 export function decodeMagicaCloth2(source) {
   const colliders = new Map();
@@ -246,13 +264,11 @@ export function decodeMagicaCloth2(source) {
           .map((r) => colliders.get(`${r.transformId}/${r.class}`)).filter(Boolean),
         prebuilt: !!(pb && pb.enabled && pb.sharePreBuildData && pb.uniquePreBuildData),
       });
+      const rpb = c.runtimePreBuild;
       if (cloth.prebuilt) {
-        const share = pb.sharePreBuildData, unique = pb.uniquePreBuildData;
-        cloth.proxy = proxyMesh(share, unique);
-        Object.assign(cloth, constraints(share));
-        cloth.initLocalGravityDirection = vec3(share.inertiaConstraintData.initLocalGravityDirection);
-        cloth.mappings = (share.renderMeshList ?? []).map((m, i) =>
-          mappingMesh(m, unique.renderMeshList[i], unique.renderSetupDataList[i]));
+        Object.assign(cloth, preBuildMeshes(pb.sharePreBuildData, pb.uniquePreBuildData));
+      } else if (rpb && rpb.version === RUNTIME_PREBUILD_VERSION) {
+        Object.assign(cloth, preBuildMeshes(rpb.sharePreBuildData, rpb.uniquePreBuildData), { runtimeBuild: true, runtimePreBuild: true });
       } else if (sd.clothType === 1) {   // BoneCloth without PreBuild: build the proxy like the game does at Start
         hierarchy ??= prefabHierarchy(source.transforms);
         const { build, ...built } = buildBoneCloth(source.transforms, { transformId: c.transformId, ...c.fields }, cloth.params, hierarchy);

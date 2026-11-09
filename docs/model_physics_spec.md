@@ -135,6 +135,13 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 - 该资产里 `buildId` 相同的那一项 SharePreBuildData 嵌入为 `sharePreBuildData`，包括代理网格、渲染映射、距离 / 弯曲 / 惯性约束数据；
 - `sharePreBuildData.renderSetupDataList` 省略了原始网格的整份拷贝（顶点、法线、切线、绑定矩阵、蒙皮权重），因为 GLB 里有这个网格，渲染顶点到代理点的映射和网格空间顶点在 `renderMeshList` 里。
 
+**`runtimePreBuild`**（可选，在 `MagicaCloth` 组件上，与 `fields` 并列）：没有可用 PreBuild 的布料，在转换时预先跑一遍游戏的运行时构建，结果放在这里，渲染器加载时就不用再构建。由渲染器的 `src/magica-cloth2/prebuild.js` 生成，转换器通过 `tools/prebuild-magica-cloth2.mjs` 调用它：
+- 结构是 `{ "version": 1, "sharePreBuildData", "uniquePreBuildData" }`，编码与上面的 PreBuild 数据相同，但只包含渲染器读取的字段：代理网格、渲染映射（`renderMeshList`，以及 `uniquePreBuildData.renderSetupDataList[i].renderer` 这个渲染器引用）、距离 / 弯曲约束、惯性约束的 `initLocalGravityDirection`；
+- 距离约束的 `indexArray` / `dataArray` / `distanceArray`，以及弯曲约束的 `restAngleOrVolumeArray` / `signOrVolumeArray`，写成小端 `{ "base64" }`（uint32 / uint16 / float32 / float32 / int8），不是游戏数据里的 JSON 数字数组；
+- 生成了 `runtimePreBuild` 的 MeshCloth 会去掉 `meshData`，因为只有构建才需要它；
+- 解码结果与加载时构建的结果逐位相同。`version` 不认识时，渲染器忽略这份数据，退回加载时构建；
+- 构建代码修正后，需要重新转换才能更新这份数据。
+
 渲染器用移植的 MagicaCloth2 求解器（`src/magica-cloth2/`，按 v2.16.0 源码逐函数移植）模拟布料，按游戏版本（约 2.10）和游戏设置运行：
 - 每个渲染帧（1/60 s）在所有 LateUpdate 之后（SpringBone、辅助骨、`afterPhysics` 之后）运行一次；模拟频率 50 Hz，每帧最多 5 步（游戏的 `MagicaClothCalculate.SetSimulationSettings`）；
 - 显示位置预测不带 2.11.1 加入的离根距离限幅（`MaxDistanceRatioFutuerPrediction`）；
@@ -146,10 +153,11 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 
 代理网格的来源：
 - 有 PreBuild 数据时直接用；
+- 否则有 `runtimePreBuild` 时直接用（转换时已按下面两条构建好）；
 - 没有 PreBuild 的 BoneCloth 在解码时按游戏的运行时构建生成（`src/magica-cloth2/build.js`：RenderSetupData → ImportBoneType 的四种连接方式 → 去重三角形 → 选择数据 → ConvertProxyMesh → 距离 / 弯曲 / 惯性约束，包括自定义蒙皮），读预制体姿态（`prefabLocal*`）和子节点顺序（`siblingIndex`）。顺序取决于 C# HashSet 与 Unity.Collections 散列容器的遍历顺序，`native-hash.js` 照样复现；法线调整用游戏版本（2.13.0 之前）的算法，与 v2.16 源码不同；
 - 没有 PreBuild 的 MeshCloth 在解码时从原始网格构建（`src/magica-cloth2/build-mesh.js`）：渲染网格导入并按预制体姿态蒙皮一次 → 按选择数据裁剪 → 并入代理网格 → 减面（SameDistance、SimpleDistance、ShapeDistance，再重组）→ 去重三角形、选择数据、ConvertProxyMesh（MeshCloth 基线）→ 渲染顶点到代理的直接映射 → 约束。需要转换器给渲染器引用加的 `meshData`。减面要排序代价相同的边（Unity.Collections 的 introsort，已照游戏二进制核对），平局的结果取决于浮点 ulp，所以代理顶点的编号不一定和游戏一致；合并点都取中点，形状和约束与游戏相同或几乎相同。
 
-不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild 也没有 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild、`runtimePreBuild` 和 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
 
 转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 
