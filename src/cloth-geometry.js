@@ -1,12 +1,7 @@
 import * as THREE from "three";
 
 /** Weld only vertices with the same position AND skin binding (UV seams). */
-/**
- * Weld render vertices that share position, skin and morphs (UV seams) into
- * cloth nodes. With explicit source proxy groups (one per vertex), vertices
- * of different groups are never welded, so every group survives as authored.
- */
-export function clothTopology(geometry, fixed, groups = null) {
+export function clothTopology(geometry, fixed) {
   const position = geometry.getAttribute("position");
   const joints = geometry.getAttribute("skinIndex");
   const weights = geometry.getAttribute("skinWeight");
@@ -24,8 +19,7 @@ export function clothTopology(geometry, fixed, groups = null) {
     if (!used.has(i)) continue;
     const key = [position.getX(i), position.getY(i), position.getZ(i)].map((v) => v.toFixed(6))
       .concat(Array.from({ length: 4 }, (_, k) => `${joints.getComponent(i, k)}:${weights.getComponent(i, k).toFixed(7)}`))
-      .concat((geometry.morphAttributes.position ?? []).flatMap((m) => [m.getX(i), m.getY(i), m.getZ(i)].map((v) => v.toFixed(6))))
-      .concat(groups ? [`g${groups[i]}`] : []).join(",");
+      .concat((geometry.morphAttributes.position ?? []).flatMap((m) => [m.getX(i), m.getY(i), m.getZ(i)].map((v) => v.toFixed(6)))).join(",");
     let node = weld.get(key);
     if (node === undefined) { node = vertices.length; weld.set(key, node); vertices.push(i); }
     mapping[i] = node;
