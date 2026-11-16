@@ -18,7 +18,12 @@ export const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 export const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 export const lengthsq = (a) => dot(a, a);
 export const length = (a) => Math.sqrt(dot(a, a));
-export const distance = (a, b) => length(sub(a, b));
+// Hot helpers below are written with scalars instead of temporary arrays; each keeps the exact operation order of the
+// composed form it replaces (noted alongside), so results are bit-identical.
+export function distance(a, b) {   // length(sub(a, b))
+  const x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+  return Math.sqrt(x * x + y * y + z * z);
+}
 export const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 export const lerpf = (a, b, t) => a + (b - a) * t;
 export const unlerp = (a, b, x) => (x - a) / (b - a);
@@ -49,9 +54,10 @@ export const qdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b
 export function qinverse(q) { const k = 1 / qdot(q, q); return [-q[0] * k, -q[1] * k, -q[2] * k, q[3] * k]; }
 export function qnormalize(q) { const k = 1 / Math.sqrt(qdot(q, q)); return [q[0] * k, q[1] * k, q[2] * k, q[3] * k]; }
 export const qscale = (q, f) => [q[0] * f[0], q[1] * f[1], q[2] * f[2], q[3] * f[3]];   // q.value * float4
-export function rotate(q, v) {   // math.mul(quaternion, float3)
-  const t = mul(cross([q[0], q[1], q[2]], v), 2);
-  return add(add(v, mul(t, q[3])), cross([q[0], q[1], q[2]], t));
+export function rotate(q, v) {   // math.mul(quaternion, float3): t = cross(q.xyz, v) * 2; v + t * q.w + cross(q.xyz, t)
+  const qx = q[0], qy = q[1], qz = q[2], qw = q[3], vx = v[0], vy = v[1], vz = v[2];
+  const tx = (qy * vz - qz * vy) * 2, ty = (qz * vx - qx * vz) * 2, tz = (qx * vy - qy * vx) * 2;
+  return [vx + tx * qw + (qy * tz - qz * ty), vy + ty * qw + (qz * tx - qx * tz), vz + tz * qw + (qx * ty - qy * tx)];
 }
 export function axisAngle(axis, angle) {   // quaternion.AxisAngle (axis normalized)
   const s = Math.sin(angle * 0.5);
@@ -80,14 +86,12 @@ export function fromMatrix3(c0, c1, c2) {
   const tNeg = t < 0 || Object.is(t, -0);
   const tr = 1 + Math.abs(u[0]);
   // sign flips applied to (t, v.x, u.z, w.y): base (+,-,-,-), ^ u_mask&(0,1,0,1), ^ t_mask&(1,1,1,0)
-  const flip = [false, true, true, true];
-  if (uNeg) { flip[1] = !flip[1]; flip[3] = !flip[3]; }
-  if (tNeg) { flip[0] = !flip[0]; flip[1] = !flip[1]; flip[2] = !flip[2]; }
-  const second = [t, v[0], u[2], w[1]].map((x, i) => (flip[i] ? -x : x));
-  let value = [tr + second[0], u[1] + second[1], w[0] + second[2], v[2] + second[3]];
-  if (uNeg) value = [value[2], value[3], value[0], value[1]];      // .zwxy
-  if (!tNeg) value = [value[3], value[2], value[1], value[0]];     // .wzyx
-  return qnormalize(value);
+  const f1 = uNeg === tNeg, f3 = !uNeg;   // flip[1] = true ^ uNeg ^ tNeg, flip[3] = true ^ uNeg
+  const s0 = tNeg ? -t : t, s1 = f1 ? -v[0] : v[0], s2 = tNeg ? u[2] : -u[2], s3 = f3 ? -w[1] : w[1];
+  let a = tr + s0, b = u[1] + s1, c = w[0] + s2, d = v[2] + s3;
+  if (uNeg) { const ta = a, tb = b; a = c; b = d; c = ta; d = tb; }        // .zwxy
+  if (!tNeg) { const ta = a, tb = b; a = d; b = c; c = tb; d = ta; }       // .wzyx
+  return qnormalize([a, b, c, d]);
 }
 export function lookRotation(forward, up) {   // quaternion.LookRotation (unit inputs)
   const t = normalize(cross(up, forward));
@@ -195,31 +199,37 @@ export function closestPtPointSegment(c, a, b) {
 }
 // -> { distSq, s, t, c1, c2 }
 export function closestPtSegmentSegment(p1, q1, p2, q2) {
-  const d1 = sub(q1, p1), d2 = sub(q2, p2), r = sub(p1, p2);
-  const a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+  const d1x = q1[0] - p1[0], d1y = q1[1] - p1[1], d1z = q1[2] - p1[2];   // d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2
+  const d2x = q2[0] - p2[0], d2y = q2[1] - p2[1], d2z = q2[2] - p2[2];
+  const rx = p1[0] - p2[0], ry = p1[1] - p2[1], rz = p1[2] - p2[2];
+  const a = d1x * d1x + d1y * d1y + d1z * d1z, e = d2x * d2x + d2y * d2y + d2z * d2z, f = d2x * rx + d2y * ry + d2z * rz;
   let s, t;
-  if (a <= 1e-8 && e <= 1e-8) return { distSq: dot(sub(p1, p2), sub(p1, p2)), s: 0, t: 0, c1: p1, c2: p2 };
+  if (a <= 1e-8 && e <= 1e-8) return { distSq: rx * rx + ry * ry + rz * rz, s: 0, t: 0, c1: p1, c2: p2 };
   if (a <= 1e-8) { s = 0; t = saturate(f / e); } else {
-    const c = dot(d1, r);
+    const c = d1x * rx + d1y * ry + d1z * rz;
     if (e <= 1e-8) { t = 0; s = saturate(-c / a); } else {
-      const b = dot(d1, d2), denom = a * e - b * b;
+      const b = d1x * d2x + d1y * d2y + d1z * d2z, denom = a * e - b * b;
       s = denom !== 0 ? saturate((b * f - c * e) / denom) : 0;
       t = (b * s + f) / e;
       if (t < 0) { t = 0; s = saturate(-c / a); } else if (t > 1) { t = 1; s = saturate((b - c) / a); }
     }
   }
-  const c1 = add(p1, mul(d1, s)), c2 = add(p2, mul(d2, t));
-  return { distSq: dot(sub(c1, c2), sub(c1, c2)), s, t, c1, c2 };
+  const c1 = [p1[0] + d1x * s, p1[1] + d1y * s, p1[2] + d1z * s], c2 = [p2[0] + d2x * t, p2[1] + d2y * t, p2[2] + d2z * t];
+  const ex = c1[0] - c2[0], ey = c1[1] - c2[1], ez = c1[2] - c2[2];
+  return { distSq: ex * ex + ey * ey + ez * ez, s, t, c1, c2 };
 }
-export function triangleTangent(p0, p1, p2, uv0, uv1, uv2) {
-  const ba = sub(p1, p0), ca = sub(p2, p0);
-  const tba = [uv1[0] - uv0[0], uv1[1] - uv0[1]], tca = [uv2[0] - uv0[0], uv2[1] - uv0[1]];
-  let area = tba[0] * tca[1] - tba[1] * tca[0];
+export function triangleTangent(p0, p1, p2, uv0, uv1, uv2) {   // scalar form, same operation order
+  const bax = p1[0] - p0[0], bay = p1[1] - p0[1], baz = p1[2] - p0[2], cax = p2[0] - p0[0], cay = p2[1] - p0[1], caz = p2[2] - p0[2];
+  const tba0 = uv1[0] - uv0[0], tba1 = uv1[1] - uv0[1], tca0 = uv2[0] - uv0[0], tca1 = uv2[1] - uv0[1];
+  let area = tba0 * tca1 - tba1 * tca0;
   if (area === 0) area = 1;
   const delta = 1 / area;
-  let tan = [(ba[0] * tca[1] + ca[0] * -tba[1]) * delta, (ba[1] * tca[1] + ca[1] * -tba[1]) * delta, (ba[2] * tca[1] + ca[2] * -tba[1]) * delta];
-  tan = neg(tan);
-  return normalizesafe(tan, [0, 0, 0]);
+  // tan = -[(ba * tca.y + ca * -tba.y) * delta]; normalizesafe(tan, 0)
+  const tx = -((bax * tca1 + cax * -tba1) * delta), ty = -((bay * tca1 + cay * -tba1) * delta), tz = -((baz * tca1 + caz * -tba1) * delta);
+  const l = tx * tx + ty * ty + tz * tz;
+  if (!(l > FLT_MIN_NORMAL)) return [0, 0, 0];
+  const k = 1 / Math.sqrt(l);
+  return [tx * k, ty * k, tz * k];
 }
 export function triangleAngle(v0, v1, v2, v3) {
   const ev = sub(v1, v0), va = sub(v2, v0), vb = sub(v3, v0);
@@ -250,6 +260,6 @@ export function evaluateCurve(curve, time) {
   const interval = 1 / 15;
   const index = Math.trunc(saturate(time) * 15);
   const t = (time - index * interval) / interval;
-  const at = (i) => curve[Math.min(15, Math.max(0, i))];
-  return lerpf(at(index), at(index + 1), t);
+  const a = curve[Math.min(15, Math.max(0, index))], b = curve[Math.min(15, Math.max(0, index + 1))];
+  return a + (b - a) * t;   // lerpf
 }

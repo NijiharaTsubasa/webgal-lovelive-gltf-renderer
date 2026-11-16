@@ -167,27 +167,28 @@ export function solveDistance(s, team, simulationPower) {
     const stiffness = M.saturate(M.evaluateCurve(p.restorationStiffness, depth)) * simulationPower[1];
     const pack = dc.index[v], dcnt = (pack >>> 20) & 0xfff, dstart = pack & 0xfffff;
     if (dcnt === 0) continue;
-    let nextPos = s.nextPos[v];
+    const nextPos = s.nextPos[v], px = nextPos[0], py = nextPos[1], pz = nextPos[2];
     const basePos = s.basePos[v];
-    let addPos = [0, 0, 0], addCnt = 0;
+    // scalar form of: d = tNext - nextPos; n = normalize(d); corr = n * k; addPos += corr * invMass (same order)
+    let ax = 0, ay = 0, az = 0, addCnt = 0;
     for (let i = 0; i < dcnt; i++) {
       const t = dc.data[dstart + i], restDist = dc.dist[dstart + i];
       const finalStiffness = M.saturate(restDist >= 0 ? stiffness : stiffness * DISTANCE_HORIZONTAL_STIFFNESS);
       const tNext = s.nextPos[t];
       const tInvMass = M.calcInverseMassFix(s.friction[t], s.depth[t], isDontMove(s.attr[t]), fixMass);
       const restLength = M.lerpf(Math.abs(restDist) * scl, M.distance(basePos, s.basePos[t]), blendRatio);
-      const d = M.sub(tNext, nextPos);
-      const distance = M.length(d);
+      const dx = tNext[0] - px, dy = tNext[1] - py, dz = tNext[2] - pz;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (distance < M.EPSILON) continue;
-      const n = M.normalize(d);
-      const corr = M.mul(n, (finalStiffness * (distance - restLength)) / (invMass + tInvMass));
-      addPos = M.add(addPos, M.mul(corr, invMass));
+      const k = 1 / distance, f = (finalStiffness * (distance - restLength)) / (invMass + tInvMass);
+      ax = ax + dx * k * f * invMass; ay = ay + dy * k * f * invMass; az = az + dz * k * f * invMass;
       addCnt++;
     }
     if (addCnt > 0) {
-      addPos = M.mul(addPos, 1 / addCnt);
-      s.nextPos[v] = M.add(nextPos, addPos);
-      s.velocityPos[v] = M.add(s.velocityPos[v], M.mul(addPos, p.velocityAttenuation));
+      const inv = 1 / addCnt, att = p.velocityAttenuation, vp = s.velocityPos[v];
+      ax = ax * inv; ay = ay * inv; az = az * inv;
+      s.nextPos[v] = [px + ax, py + ay, pz + az];
+      s.velocityPos[v] = [vp[0] + ax * att, vp[1] + ay * att, vp[2] + az * att];
     }
   }
 }
@@ -237,9 +238,10 @@ export function solveAngle(s, team, simulationPower) {
         const pattr = s.attr[pv];
         const pInvMass = M.calcInverseMassF(s.friction[pv]);
         angleLimit: if (ap.useAngleLimit) {
+          // scalar form of the source's float3 chain (same operation order); arrays only where a helper takes one
           const prot = rotBuf[pv], localPos = localPosBuf[v], localRot = localRotBuf[v];
-          let d = M.sub(cpos, ppos);
-          let vlen = M.length(d);
+          let dx = cpos[0] - ppos[0], dy = cpos[1] - ppos[1], dz = cpos[2] - ppos[2];
+          let vlen = Math.sqrt(dx * dx + dy * dy + dz * dz);
           if (vlen < M.EPSILON) break angleLimit;
           let tv = M.rotate(prot, localPos);
           const tvlen = M.length(tv);
@@ -250,35 +252,40 @@ export function solveAngle(s, team, simulationPower) {
             rotBuf[v] = M.qmul(prot, localRot);
             break angleLimit;
           }
-          d = M.mul(d, 1 / vlen);
+          const iv = 1 / vlen;
+          dx = dx * iv; dy = dy * iv; dz = dz * iv;
           tv = M.mul(tv, 1 / tvlen);
           const blen = lengthBuf[v];
           vlen = M.lerpf(vlen, blen, 0.5);
           if (blen < M.EPSILON || vlen < M.EPSILON) break angleLimit;
-          d = M.mul(d, vlen);
+          const d = [dx * vlen, dy * vlen, dz * vlen];
           const maxAngleRad = M.radians(M.evaluateCurve(ap.limitCurveData, cdepth));
           const angle = M.angleV(d, tv);
           let rv = d;
           if (angle > maxAngleRad) rv = M.clampAngleV(d, tv, M.lerpf(angle, maxAngleRad, ap.limitstiffness))[0];
-          const rotPos = M.add(ppos, M.mul(d, limitRotRatio));
-          const pfpos = M.sub(rotPos, M.mul(rv, limitRotRatio));
-          const cfpos = M.add(rotPos, M.mul(rv, 1 - limitRotRatio));
-          const padd = M.mul(M.sub(pfpos, ppos), pInvMass), cadd = M.mul(M.sub(cfpos, cpos), cInvMass);
+          const crr = 1 - limitRotRatio;
+          const rpx = ppos[0] + d[0] * limitRotRatio, rpy = ppos[1] + d[1] * limitRotRatio, rpz = ppos[2] + d[2] * limitRotRatio;   // rotPos
+          const pax = (rpx - rv[0] * limitRotRatio - ppos[0]) * pInvMass, pay = (rpy - rv[1] * limitRotRatio - ppos[1]) * pInvMass,
+            paz = (rpz - rv[2] * limitRotRatio - ppos[2]) * pInvMass;   // padd = (pfpos - ppos) * pInvMass
+          const cax = (rpx + rv[0] * crr - cpos[0]) * cInvMass, cay = (rpy + rv[1] * crr - cpos[1]) * cInvMass,
+            caz = (rpz + rv[2] * crr - cpos[2]) * cInvMass;   // cadd = (cfpos - cpos) * cInvMass
           if (isMove(cattr)) {
-            cpos = M.add(cpos, cadd);
+            const vp = s.velocityPos[v];
+            cpos = [cpos[0] + cax, cpos[1] + cay, cpos[2] + caz];
             s.nextPos[v] = cpos;
-            s.velocityPos[v] = M.add(s.velocityPos[v], M.mul(cadd, ANGLE_LIMIT_ATTENUATION));
+            s.velocityPos[v] = [vp[0] + cax * ANGLE_LIMIT_ATTENUATION, vp[1] + cay * ANGLE_LIMIT_ATTENUATION, vp[2] + caz * ANGLE_LIMIT_ATTENUATION];
           }
           if (isMove(pattr)) {
-            ppos = M.add(ppos, padd);
+            const vp = s.velocityPos[pv];
+            ppos = [ppos[0] + pax, ppos[1] + pay, ppos[2] + paz];
             s.nextPos[pv] = ppos;
-            s.velocityPos[pv] = M.add(s.velocityPos[pv], M.mul(padd, ANGLE_LIMIT_ATTENUATION));
+            s.velocityPos[pv] = [vp[0] + pax * ANGLE_LIMIT_ATTENUATION, vp[1] + pay * ANGLE_LIMIT_ATTENUATION, vp[2] + paz * ANGLE_LIMIT_ATTENUATION];
           }
-          d = M.sub(cpos, ppos);
-          vlen = M.length(d);
+          dx = cpos[0] - ppos[0]; dy = cpos[1] - ppos[1]; dz = cpos[2] - ppos[2];
+          vlen = Math.sqrt(dx * dx + dy * dy + dz * dz);
           if (vlen < M.EPSILON) break angleLimit;
-          d = M.mul(d, 1 / vlen);
-          rotBuf[v] = M.qmul(M.fromToRotationWithoutNormalize(tv, d), M.qmul(prot, localRot));
+          const iv2 = 1 / vlen;
+          rotBuf[v] = M.qmul(M.fromToRotationWithoutNormalize(tv, [dx * iv2, dy * iv2, dz * iv2]), M.qmul(prot, localRot));
         }
         if (ap.useAngleRestoration) {
           const tv = restVecBuf[v], tvlen = M.length(tv);
@@ -294,20 +301,23 @@ export function solveAngle(s, team, simulationPower) {
           restorationStiffness *= gravityFalloff;
           const q = M.fromToRotationWithoutNormalize(M.mul(d, 1 / vlen), M.mul(tv, 1 / tvlen), restorationStiffness);
           const rv = M.rotate(q, d);
-          const rotPos = M.add(ppos, M.mul(d, restorationRotRatio));
-          const pfpos = M.sub(rotPos, M.mul(rv, restorationRotRatio));
-          const cfpos = M.add(rotPos, M.mul(rv, 1 - restorationRotRatio));
+          // rotPos / pfpos / cfpos / padd / cadd as scalars (same operation order)
+          const rr = restorationRotRatio, crr = 1 - restorationRotRatio, att = ap.restorationVelocityAttenuation;
+          const rpx = ppos[0] + d[0] * rr, rpy = ppos[1] + d[1] * rr, rpz = ppos[2] + d[2] * rr;
           // NOTE the source multiplies padd by the CHILD's and cadd by the PARENT's inverse mass (kept as is)
-          const padd = M.mul(M.sub(pfpos, ppos), cInvMass), cadd = M.mul(M.sub(cfpos, cpos), pInvMass);
+          const pax = (rpx - rv[0] * rr - ppos[0]) * cInvMass, pay = (rpy - rv[1] * rr - ppos[1]) * cInvMass, paz = (rpz - rv[2] * rr - ppos[2]) * cInvMass;
+          const cax = (rpx + rv[0] * crr - cpos[0]) * pInvMass, cay = (rpy + rv[1] * crr - cpos[1]) * pInvMass, caz = (rpz + rv[2] * crr - cpos[2]) * pInvMass;
           if (isMove(cattr)) {
-            cpos = M.add(cpos, cadd);
+            const vp = s.velocityPos[v];
+            cpos = [cpos[0] + cax, cpos[1] + cay, cpos[2] + caz];
             s.nextPos[v] = cpos;
-            s.velocityPos[v] = M.add(s.velocityPos[v], M.mul(cadd, ap.restorationVelocityAttenuation));
+            s.velocityPos[v] = [vp[0] + cax * att, vp[1] + cay * att, vp[2] + caz * att];
           }
           if (isMove(pattr)) {
-            ppos = M.add(ppos, padd);
+            const vp = s.velocityPos[pv];
+            ppos = [ppos[0] + pax, ppos[1] + pay, ppos[2] + paz];
             s.nextPos[pv] = ppos;
-            s.velocityPos[pv] = M.add(s.velocityPos[pv], M.mul(padd, ap.restorationVelocityAttenuation));
+            s.velocityPos[pv] = [vp[0] + pax * att, vp[1] + pay * att, vp[2] + paz * att];
           }
         }
       }

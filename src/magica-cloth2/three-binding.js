@@ -9,6 +9,7 @@ import { decodeMagicaCloth2 } from "./data.js";
 import { MagicaClothTeam } from "./cloth.js";
 
 const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3();
+const writeR = new THREE.Quaternion(), writeT = new THREE.Vector3();   // MappedMesh.write: the binding's fit, set once per call
 
 export class MagicaClothBinding {
   /**
@@ -249,11 +250,15 @@ class MappedMesh {
       s.inverse.copy(this.skin).invert();
       s.normal.setFromMatrix4(s.inverse);
     }
+    // binding._posToWorld / _dirToWorld inlined with the fit quaternion and translation set once (same operations)
+    const mirror = binding.mirror, scale = binding.scale, rootWorld = binding.root.matrixWorld;
+    const R = writeR.set(binding.R[0], binding.R[1], binding.R[2], binding.R[3]), T = writeT.set(binding.T[0], binding.T[1], binding.T[2]);
     for (let k = 0; k < result.positions.length; k++) {
       const p = result.positions[k];
       if (!p) continue;
       const vi = this.mapping.referenceIndices[k], skin = this.skinOf[k];
-      binding._posToWorld(p, this.p).applyMatrix4(meshInv).applyMatrix4(skin.inverse);
+      this.p.set(mirror ? -p[0] : p[0], p[1], p[2]).applyQuaternion(R).multiplyScalar(scale).add(T).applyMatrix4(rootWorld)
+        .applyMatrix4(meshInv).applyMatrix4(skin.inverse);
       if (morph && influences) {   // the morph displacement is added before skinning: remove it again
         let base = 1;
         for (let t = 0; t < morph.length; t++) {
@@ -264,8 +269,9 @@ class MappedMesh {
         if (!relative && base !== 1) throw new Error("magicaCloth2: absolute morph targets on a cloth mesh are not supported");
       }
       this.position.setXYZ(vi, this.p.x, this.p.y, this.p.z);
-      if (this.normal && result.normals[k]) {
-        binding._dirToWorld(result.normals[k], this.nrm).transformDirection(meshInv);
+      const n = result.normals[k];
+      if (this.normal && n) {
+        this.nrm.set(mirror ? -n[0] : n[0], n[1], n[2]).applyQuaternion(R).transformDirection(rootWorld).transformDirection(meshInv);
         this.nrm.applyMatrix3(skin.normal).normalize();
         this.normal.setXYZ(vi, this.nrm.x, this.nrm.y, this.nrm.z);
       }

@@ -5,6 +5,8 @@
 import * as M from "./math.js";
 import { isMove, isFixed, isInvalid } from "./simulation.js";
 
+const ZERO3 = Object.freeze([0, 0, 0]);
+
 /** SimulationPreProxyMeshUpdate: skin the proxy vertices with the proxy transforms' localToWorld matrices. */
 export function preProxyMeshUpdate(s, proxy, transformMatrices) {
   // localToWorld * bindPose once per skin bone (the source multiplies per vertex and weight: same result)
@@ -79,27 +81,33 @@ export function postProxyTriangles(s, proxy) {
   for (let t = 0; t < ntri; t++) {
     const a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
     const p1 = s.positions[a], p2 = s.positions[b], p3 = s.positions[c];
-    const cr = M.cross(M.sub(p2, p1), M.sub(p3, p1)), len = M.length(cr);
-    if (len > M.EPSILON) nor[t] = M.mul(cr, 1 / len);     // (else: keep the previous value, like the source)
+    // cr = cross(p2 - p1, p3 - p1) as scalars
+    const ux = p2[0] - p1[0], uy = p2[1] - p1[1], uz = p2[2] - p1[2], wx = p3[0] - p1[0], wy = p3[1] - p1[1], wz = p3[2] - p1[2];
+    const cx = uy * wz - uz * wy, cy = uz * wx - ux * wz, cz = ux * wy - uy * wx;
+    const len = Math.sqrt(cx * cx + cy * cy + cz * cz);
+    if (len > M.EPSILON) { const il = 1 / len; nor[t] = [cx * il, cy * il, cz * il]; }   // (else: keep the previous value, like the source)
     const tg = M.triangleTangent(p1, p2, p3, proxy.uv[a], proxy.uv[b], proxy.uv[c]);
-    if (M.lengthsq(tg) > 0) tan[t] = tg;
+    if (tg[0] * tg[0] + tg[1] * tg[1] + tg[2] * tg[2] > 0) tan[t] = tg;
   }
   for (let v = 0; v < proxy.count; v++) {
     const list = proxy.vertexToTriangles[v];
     if (!list.length) continue;
-    let n = [0, 0, 0], g = [0, 0, 0];
+    let nx = 0, ny = 0, nz = 0, gx = 0, gy = 0, gz = 0;   // n += nor * ±1, g += tan * ±1
     for (const data of list) {
       const flip = (data >>> 20) & 0xfff, t = data & 0xfffff;
-      n = M.add(n, M.mul(nor[t], (flip & 1) === 0 ? 1 : -1));
-      g = M.add(g, M.mul(tan[t], (flip & 2) === 0 ? 1 : -1));
+      const sn = (flip & 1) === 0 ? 1 : -1, sg = (flip & 2) === 0 ? 1 : -1, tn = nor[t], tt = tan[t];
+      nx = nx + tn[0] * sn; ny = ny + tn[1] * sn; nz = nz + tn[2] * sn;
+      gx = gx + tt[0] * sg; gy = gy + tt[1] * sg; gz = gz + tt[2] * sg;
     }
-    const ln = M.length(n), lt = M.length(g);
+    const ln = Math.sqrt(nx * nx + ny * ny + nz * nz), lt = Math.sqrt(gx * gx + gy * gy + gz * gz);
     if (ln > 1e-6 && lt > 1e-6) {
-      n = M.mul(n, 1 / ln); g = M.mul(g, 1 / lt);
-      const d = M.dot(n, g);
+      const kn = 1 / ln, kg = 1 / lt;
+      nx = nx * kn; ny = ny * kn; nz = nz * kn; gx = gx * kg; gy = gy * kg; gz = gz * kg;
+      const d = nx * gx + ny * gy + nz * gz;
       if (d !== 1 && d !== -1) {
-        const binor = M.normalize(M.cross(n, g));
-        s.rotations[v] = M.qmul(M.lookRotation(binor, n), proxy.normalAdjustmentRotations[v]);
+        // binor = normalize(cross(n, g))
+        const bx = ny * gz - nz * gy, by = nz * gx - nx * gz, bz = nx * gy - ny * gx, kb = 1 / Math.sqrt(bx * bx + by * by + bz * bz);
+        s.rotations[v] = M.qmul(M.lookRotation([bx * kb, by * kb, bz * kb], [nx, ny, nz]), proxy.normalAdjustmentRotations[v]);
       }
     }
   }
@@ -162,7 +170,8 @@ export function mappingWorld(s, proxy, mapping, center, proxyCenter, initScale, 
   for (let k = 0; k < n; k++) {
     const attr = mapping.attr[k];
     if (isInvalid(attr) || isFixed(attr)) { positions[k] = normals[k] = tangents[k] = null; continue; }
-    const [px, py, pz] = local.p[k], [nx, ny, nz] = local.n[k], [tx, ty, tz] = useTangent ? local.t[k] : [0, 0, 0];
+    const lp = local.p[k], ln = local.n[k], lt = useTangent ? local.t[k] : ZERO3;
+    const px = lp[0], py = lp[1], pz = lp[2], nx = ln[0], ny = ln[1], nz = ln[2], tx = lt[0], ty = lt[1], tz = lt[2];
     const bw = mapping.boneWeights[k], wcnt = weightCount(bw);
     let x = 0, y = 0, z = 0, a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
     for (let i = 0; i < wcnt; i++) {
@@ -172,8 +181,9 @@ export function mappingWorld(s, proxy, mapping, center, proxyCenter, initScale, 
       d += (q[0] * tx + q[1] * ty + q[2] * tz) * w; e += (q[3] * tx + q[4] * ty + q[5] * tz) * w; f += (q[6] * tx + q[7] * ty + q[8] * tz) * w;
     }
     positions[k] = [x, y, z];
-    normals[k] = M.normalize([a, b, c]);
-    tangents[k] = useTangent ? M.normalize([d, e, f]) : null;
+    const kn = 1 / Math.sqrt(a * a + b * b + c * c);   // M.normalize, one array instead of two
+    normals[k] = [a * kn, b * kn, c * kn];
+    if (useTangent) { const kt = 1 / Math.sqrt(d * d + e * e + f * f); tangents[k] = [d * kt, e * kt, f * kt]; } else tangents[k] = null;
   }
   return { positions, normals, tangents };
 }

@@ -17,7 +17,6 @@ function interlockMax(index, value, pt) {
   const ival = Math.trunc(value) * TO_FIXED;
   if (ival > pt[index]) pt[index] = ival;
 }
-const readFloat3 = (index, pt) => [pt[index * 3] * TO_FLOAT, pt[index * 3 + 1] * TO_FLOAT, pt[index * 3 + 2] * TO_FLOAT];
 
 // ------------------------------------------------------------------ TriangleBending (DirectionDihedralAngle)
 function calcVolume(p, invMass, volumeRest, stiffness) {
@@ -35,27 +34,43 @@ function calcVolume(p, invMass, volumeRest, stiffness) {
   return [M.mul(g0, lambda * invMass[0]), M.mul(g1, lambda * invMass[1]), M.mul(g2, lambda * invMass[2]), M.mul(g3, lambda * invMass[3])];
 }
 
+// Scalar form of the float3 expressions (comments give the source form); same operation order, bit-identical.
 function calcDihedralAngle(sign, p, invMass, restAngle, stiffness) {
-  const [p0, p1, p2, p3] = p;
-  const e = M.sub(p3, p2), elen = M.length(e);
+  const p0 = p[0], p1 = p[1], p2 = p[2], p3 = p[3];
+  const ex = p3[0] - p2[0], ey = p3[1] - p2[1], ez = p3[2] - p2[2];   // e = p3 - p2
+  const elen = Math.sqrt(ex * ex + ey * ey + ez * ez);
   if (elen < 1e-8) return null;
   const invElen = 1 / elen;
-  let n1 = M.cross(M.sub(p2, p0), M.sub(p3, p0));
-  let n2 = M.cross(M.sub(p3, p1), M.sub(p2, p1));
-  const n1sq = M.lengthsq(n1), n2sq = M.lengthsq(n2);
+  // n1 = cross(p2 - p0, p3 - p0), n2 = cross(p3 - p1, p2 - p1)
+  let ax = p2[0] - p0[0], ay = p2[1] - p0[1], az = p2[2] - p0[2], bx = p3[0] - p0[0], by = p3[1] - p0[1], bz = p3[2] - p0[2];
+  let n1x = ay * bz - az * by, n1y = az * bx - ax * bz, n1z = ax * by - ay * bx;
+  ax = p3[0] - p1[0]; ay = p3[1] - p1[1]; az = p3[2] - p1[2]; bx = p2[0] - p1[0]; by = p2[1] - p1[1]; bz = p2[2] - p1[2];
+  let n2x = ay * bz - az * by, n2y = az * bx - ax * bz, n2z = ax * by - ay * bx;
+  const n1sq = n1x * n1x + n1y * n1y + n1z * n1z, n2sq = n2x * n2x + n2y * n2y + n2z * n2z;
   if (n1sq === 0 || n2sq === 0) return null;
-  n1 = M.mul(n1, 1 / n1sq); n2 = M.mul(n2, 1 / n2sq);
-  const d0 = M.mul(n1, elen), d1 = M.mul(n2, elen);
-  const d2 = M.add(M.mul(n1, M.dot(M.sub(p0, p3), e) * invElen), M.mul(n2, M.dot(M.sub(p1, p3), e) * invElen));
-  const d3 = M.add(M.mul(n1, M.dot(M.sub(p2, p0), e) * invElen), M.mul(n2, M.dot(M.sub(p2, p1), e) * invElen));
-  n1 = M.normalize(n1); n2 = M.normalize(n2);
-  let phi = Math.acos(M.clamp1(M.dot(n1, n2)));
-  let lambda = invMass[0] * M.lengthsq(d0) + invMass[1] * M.lengthsq(d1) + invMass[2] * M.lengthsq(d2) + invMass[3] * M.lengthsq(d3);
+  const k1 = 1 / n1sq, k2 = 1 / n2sq;
+  n1x = n1x * k1; n1y = n1y * k1; n1z = n1z * k1; n2x = n2x * k2; n2y = n2y * k2; n2z = n2z * k2;
+  const d0x = n1x * elen, d0y = n1y * elen, d0z = n1z * elen, d1x = n2x * elen, d1y = n2y * elen, d1z = n2z * elen;
+  // d2 = n1 * (dot(p0 - p3, e) * invElen) + n2 * (dot(p1 - p3, e) * invElen); d3 likewise with p2 - p0, p2 - p1
+  let s1 = ((p0[0] - p3[0]) * ex + (p0[1] - p3[1]) * ey + (p0[2] - p3[2]) * ez) * invElen;
+  let s2 = ((p1[0] - p3[0]) * ex + (p1[1] - p3[1]) * ey + (p1[2] - p3[2]) * ez) * invElen;
+  const d2x = n1x * s1 + n2x * s2, d2y = n1y * s1 + n2y * s2, d2z = n1z * s1 + n2z * s2;
+  s1 = ((p2[0] - p0[0]) * ex + (p2[1] - p0[1]) * ey + (p2[2] - p0[2]) * ez) * invElen;
+  s2 = ((p2[0] - p1[0]) * ex + (p2[1] - p1[1]) * ey + (p2[2] - p1[2]) * ez) * invElen;
+  const d3x = n1x * s1 + n2x * s2, d3y = n1y * s1 + n2y * s2, d3z = n1z * s1 + n2z * s2;
+  // n1 = normalize(n1), n2 = normalize(n2)
+  const u1 = 1 / Math.sqrt(n1x * n1x + n1y * n1y + n1z * n1z), u2 = 1 / Math.sqrt(n2x * n2x + n2y * n2y + n2z * n2z);
+  n1x = n1x * u1; n1y = n1y * u1; n1z = n1z * u1; n2x = n2x * u2; n2y = n2y * u2; n2z = n2z * u2;
+  let phi = Math.acos(M.clamp1(n1x * n2x + n1y * n2y + n1z * n2z));
+  let lambda = invMass[0] * (d0x * d0x + d0y * d0y + d0z * d0z) + invMass[1] * (d1x * d1x + d1y * d1y + d1z * d1z)
+    + invMass[2] * (d2x * d2x + d2y * d2y + d2z * d2z) + invMass[3] * (d3x * d3x + d3y * d3y + d3z * d3z);
   if (lambda === 0) return null;
-  const dirSign = Math.sign(M.dot(M.cross(n1, n2), e));
+  // sign(dot(cross(n1, n2), e))
+  const dirSign = Math.sign((n1y * n2z - n1z * n2y) * ex + (n1z * n2x - n1x * n2z) * ey + (n1x * n2y - n1y * n2x) * ez);
   if (sign !== 0) phi *= dirSign; else lambda *= dirSign;
   lambda = ((restAngle - phi) / lambda) * stiffness;
-  return [M.mul(d0, -invMass[0] * lambda), M.mul(d1, -invMass[1] * lambda), M.mul(d2, -invMass[2] * lambda), M.mul(d3, -invMass[3] * lambda)];
+  const f0 = -invMass[0] * lambda, f1 = -invMass[1] * lambda, f2 = -invMass[2] * lambda, f3 = -invMass[3] * lambda;
+  return [[d0x * f0, d0y * f0, d0z * f0], [d1x * f1, d1y * f1, d1z * f1], [d2x * f2, d2y * f2, d2z * f2], [d3x * f3, d3y * f3, d3z * f3]];
 }
 
 /** TriangleBendingConstraint.SolverConstraint + SumConstraint */
@@ -66,9 +81,9 @@ export function solveTriangleBending(s, team, simulationPower) {
   if (stiffness < 1e-6) return;
   stiffness = M.saturate(stiffness * simulationPower[1]);
   const sum = s.tmpVecA, cnt = s.tmpCount;
+  const pos = new Array(4), invMass = new Array(4);   // reused: the calc functions read them, never keep them
   for (let k = 0; k < bc.pairs.length; k++) {
     const vtx = bc.pairs[k];   // [v0, v1, v2, v3]
-    const pos = new Array(4), invMass = new Array(4);
     for (let i = 0; i < 4; i++) {
       const v = vtx[i];
       pos[i] = s.nextPos[v];
@@ -93,9 +108,8 @@ export function solveTriangleBending(s, team, simulationPower) {
     if (!isDontMove(s.attr[v])) {
       const c = cnt[v];
       if (c > 0) {
-        const k = v * 3;
-        const add = [(sum[k] / c) * TO_FLOAT, (sum[k + 1] / c) * TO_FLOAT, (sum[k + 2] / c) * TO_FLOAT];
-        s.nextPos[v] = M.add(s.nextPos[v], add);
+        const k = v * 3, np = s.nextPos[v];
+        s.nextPos[v] = [np[0] + (sum[k] / c) * TO_FLOAT, np[1] + (sum[k + 1] / c) * TO_FLOAT, np[2] + (sum[k + 2] / c) * TO_FLOAT];
       }
     }
     cnt[v] = 0; sum[v * 3] = 0; sum[v * 3 + 1] = 0; sum[v * 3 + 2] = 0;
@@ -104,7 +118,6 @@ export function solveTriangleBending(s, team, simulationPower) {
 
 // ------------------------------------------------------------------ AABB helpers
 const aabb = (min, max) => ({ min, max });
-const aabbAround = (p, r) => aabb(M.sub(p, [r, r, r]), M.add(p, [r, r, r]));
 function aabbExpand(a, r) { a.min = M.sub(a.min, [r, r, r]); a.max = M.add(a.max, [r, r, r]); return a; }
 function aabbEncapsulate(a, b) {
   a.min = [Math.min(a.min[0], b.min[0]), Math.min(a.min[1], b.min[1]), Math.min(a.min[2], b.min[2])];
@@ -168,10 +181,18 @@ export function solvePointCollision(s, team, colliders) {
     let mindist = Number.MAX_VALUE, collisionColliderId = -1;
     let collisionNormal = [0, 0, 0], addPos = [0, 0, 0], addN = [0, 0, 0], addCnt = 0;
     const cfr = radius;
-    const box = aabbExpand(aabbAround(nextPos, radius), cfr);
+    // aabbExpand(aabbAround(nextPos, radius), cfr), as scalars; a sphere / capsule whose box misses is skipped
+    const minX = nextPos[0] - radius - cfr, minY = nextPos[1] - radius - cfr, minZ = nextPos[2] - radius - cfr;
+    const maxX = nextPos[0] + radius + cfr, maxY = nextPos[1] + radius + cfr, maxZ = nextPos[2] + radius + cfr;
+    let box = null;
     for (let i = 0; i < colliders.count; i++) {
       if (!colliders.enable[i]) continue;
       const type = colliders.type[i], w = colliders.work[i];
+      if (type !== CT_PLANE) {
+        const b = w.aabb;
+        if (!(maxX >= b.min[0] && minX <= b.max[0] && maxY >= b.min[1] && minY <= b.max[1] && maxZ >= b.min[2] && minZ <= b.max[2])) continue;
+        box ??= aabb([minX, minY, minZ], [maxX, maxY, maxZ]);
+      }
       let r;
       if (type === CT_SPHERE) r = pointSphere(nextPos, radius, box, w);
       else if (type >= CT_CAPSULE_MIN && type <= CT_CAPSULE_MAX) r = pointCapsule(nextPos, radius, box, w);
@@ -224,37 +245,46 @@ function edgeSphere(e, rE, box, cfr, w) {
   S = C / S;
   return [-C, [M.add(e[0], M.mul(n, b[0] * S)), M.add(e[1], M.mul(n, b[1] * S))], n];
 }
+// Scalar form of the source's float3 expressions (in the comments); same operation order, bit-identical.
 function edgeCapsule(e, rE, box, cfr, w) {
   if (!aabbOverlaps(box, w.aabb)) return [Number.MAX_VALUE, e, [0, 0, 0]];
-  const [soldpos, eoldpos] = w.oldPos, [spos, epos] = w.nextPos;
-  const sr = w.radius[0], er = w.radius[1];
-  let { distSq, s, t, c1: cA, c2: cB } = M.closestPtSegmentSegment(e[0], e[1], soldpos, eoldpos);
+  const soldpos = w.oldPos[0], eoldpos = w.oldPos[1], spos = w.nextPos[0], epos = w.nextPos[1];
+  const sr = w.radius[0], er = w.radius[1], e0 = e[0], e1 = e[1];
+  let { distSq, s, t, c1: cA, c2: cB } = M.closestPtSegmentSegment(e0, e1, soldpos, eoldpos);
   let clen = Math.sqrt(distSq);
   if (clen < 1e-9) return [Number.MAX_VALUE, e, [0, 0, 0]];
-  let v = M.sub(cA, cB);
-  let n = M.mul(v, 1 / clen);
+  let cax = cA[0], cay = cA[1], caz = cA[2];
+  let vx = cax - cB[0], vy = cay - cB[1], vz = caz - cB[2];   // v = cA - cB; n = v * (1 / clen)
+  let k = 1 / clen, nx = vx * k, ny = vy * k, nz = vz * k;
   if (sr !== er) {   // edge collision extension (present since 2.9.0)
-    const soldpos2 = M.add(soldpos, M.mul(n, sr)), eoldpos2 = M.add(eoldpos, M.mul(n, er));
-    ({ s, t } = M.closestPtSegmentSegment(e[0], e[1], soldpos2, eoldpos2));
-    cA = M.lerp(e[0], e[1], s);
-    cB = M.lerp(soldpos, eoldpos, t);
-    v = M.sub(cA, cB);
-    clen = M.length(v);
-    n = M.mul(v, 1 / clen);
+    const soldpos2 = [soldpos[0] + nx * sr, soldpos[1] + ny * sr, soldpos[2] + nz * sr];
+    const eoldpos2 = [eoldpos[0] + nx * er, eoldpos[1] + ny * er, eoldpos[2] + nz * er];
+    ({ s, t } = M.closestPtSegmentSegment(e0, e1, soldpos2, eoldpos2));
+    cax = e0[0] + (e1[0] - e0[0]) * s; cay = e0[1] + (e1[1] - e0[1]) * s; caz = e0[2] + (e1[2] - e0[2]) * s;   // lerp(e0, e1, s)
+    vx = cax - (soldpos[0] + (eoldpos[0] - soldpos[0]) * t);                                                   // cA - lerp(soldpos, eoldpos, t)
+    vy = cay - (soldpos[1] + (eoldpos[1] - soldpos[1]) * t);
+    vz = caz - (soldpos[2] + (eoldpos[2] - soldpos[2]) * t);
+    clen = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    k = 1 / clen; nx = vx * k; ny = vy * k; nz = vz * k;
   }
-  const db = M.lerp(M.sub(spos, soldpos), M.sub(epos, eoldpos), t);
-  let l = clen - M.dot(n, db);
+  const n = [nx, ny, nz];
+  // db = lerp(spos - soldpos, epos - eoldpos, t)
+  const ax = spos[0] - soldpos[0], ay = spos[1] - soldpos[1], az = spos[2] - soldpos[2];
+  const bx = epos[0] - eoldpos[0], by = epos[1] - eoldpos[1], bz = epos[2] - eoldpos[2];
+  let l = clen - (nx * (ax + (bx - ax) * t) + ny * (ay + (by - ay) * t) + nz * (az + (bz - az) * t));
   const thickness = M.lerpf(rE[0], rE[1], s) + M.lerpf(sr, er, t);
   if (l > thickness + cfr) return [Number.MAX_VALUE, e, n];
-  const d = M.lerp(spos, epos, t);
-  l = M.dot(n, M.sub(cA, d));
+  // d = lerp(spos, epos, t); l = dot(n, cA - d)
+  const dx = spos[0] + (epos[0] - spos[0]) * t, dy = spos[1] + (epos[1] - spos[1]) * t, dz = spos[2] + (epos[2] - spos[2]) * t;
+  l = nx * (cax - dx) + ny * (cay - dy) + nz * (caz - dz);
   if (l > thickness) return [l - thickness, e, n];
   const C = thickness - l;
-  const b = [1 - s, s];
-  let S = b[0] * b[0] + b[1] * b[1];
+  const b0 = 1 - s, b1 = s;
+  let S = b0 * b0 + b1 * b1;
   if (S === 0) return [Number.MAX_VALUE, e, n];
   S = C / S;
-  return [-C, [M.add(e[0], M.mul(n, b[0] * S)), M.add(e[1], M.mul(n, b[1] * S))], n];
+  const f0 = b0 * S, f1 = b1 * S;
+  return [-C, [[e0[0] + nx * f0, e0[1] + ny * f0, e0[2] + nz * f0], [e1[0] + nx * f1, e1[1] + ny * f1, e1[2] + nz * f1]], n];
 }
 function edgePlane(e, rE, w) {
   const cpos = w.nextPos[0], n = w.oldPos[0];
@@ -271,15 +301,25 @@ export function solveEdgeCollision(s, team, colliders) {
   for (let k = 0; k < edges.length; k += 2) {
     const e0 = edges[k], e1 = edges[k + 1];
     if (!isMove(s.attr[e0]) && !isMove(s.attr[e1])) continue;
-    const nextPosE = [s.nextPos[e0], s.nextPos[e1]];
-    const rE = [M.evaluateCurve(p.radiusCurveData, s.depth[e0]) * team.scaleRatio, M.evaluateCurve(p.radiusCurveData, s.depth[e1]) * team.scaleRatio];
-    const cfr = (rE[0] + rE[1]) * 0.5;
-    let mindist = Number.MAX_VALUE, collisionColliderId = -1, collisionNormal = [0, 0, 0];
-    const box = aabbExpand(aabbEncapsulate(aabbAround(nextPosE[0], rE[0]), aabbAround(nextPosE[1], rE[1])), cfr);
-    let add0 = [0, 0, 0], add1 = [0, 0, 0], addN = [0, 0, 0], addCnt = 0;
+    const q0 = s.nextPos[e0], q1 = s.nextPos[e1];
+    const r0 = M.evaluateCurve(p.radiusCurveData, s.depth[e0]) * team.scaleRatio, r1 = M.evaluateCurve(p.radiusCurveData, s.depth[e1]) * team.scaleRatio;
+    const cfr = (r0 + r1) * 0.5;
+    let mindist = Number.MAX_VALUE, collisionColliderId = -1;
+    // aabbExpand(aabbEncapsulate(aabbAround(q0, r0), aabbAround(q1, r1)), cfr), as scalars
+    const minX = Math.min(q0[0] - r0, q1[0] - r1) - cfr, minY = Math.min(q0[1] - r0, q1[1] - r1) - cfr, minZ = Math.min(q0[2] - r0, q1[2] - r1) - cfr;
+    const maxX = Math.max(q0[0] + r0, q1[0] + r1) + cfr, maxY = Math.max(q0[1] + r0, q1[1] + r1) + cfr, maxZ = Math.max(q0[2] + r0, q1[2] + r1) + cfr;
+    let nextPosE = null, rE = null, box = null;   // built on the first collider that needs them
+    // accumulators add0, add1, addN, collisionNormal as scalars (same additions in the same order)
+    let a0x = 0, a0y = 0, a0z = 0, a1x = 0, a1y = 0, a1z = 0, anx = 0, any = 0, anz = 0, cnx = 0, cny = 0, cnz = 0, addCnt = 0;
     for (let i = 0; i < colliders.count; i++) {
       if (!colliders.enable[i]) continue;
       const type = colliders.type[i], w = colliders.work[i];
+      if (type !== CT_PLANE) {
+        // a sphere / capsule whose box misses returns [MAX_VALUE, ...], which neither pushes nor counts: skip it
+        const b = w.aabb;
+        if (!(maxX >= b.min[0] && minX <= b.max[0] && maxY >= b.min[1] && minY <= b.max[1] && maxZ >= b.min[2] && minZ <= b.max[2])) continue;
+      }
+      if (!nextPosE) { nextPosE = [q0, q1]; rE = [r0, r1]; box = aabb([minX, minY, minZ], [maxX, maxY, maxZ]); }
       let r;
       if (type === CT_SPHERE) r = edgeSphere(nextPosE, rE, box, cfr, w);
       else if (type >= CT_CAPSULE_MIN && type <= CT_CAPSULE_MAX) r = edgeCapsule(nextPosE, rE, box, cfr, w);
@@ -287,25 +327,29 @@ export function solveEdgeCollision(s, team, colliders) {
       else continue;
       const [dist, out, n] = r;
       if (dist <= 0) {
-        add0 = M.add(add0, M.sub(out[0], nextPosE[0])); add1 = M.add(add1, M.sub(out[1], nextPosE[1]));
-        addN = M.add(addN, n); addCnt++;
+        const o0 = out[0], o1 = out[1];
+        a0x = a0x + (o0[0] - q0[0]); a0y = a0y + (o0[1] - q0[1]); a0z = a0z + (o0[2] - q0[2]);
+        a1x = a1x + (o1[0] - q1[0]); a1y = a1y + (o1[1] - q1[1]); a1z = a1z + (o1[2] - q1[2]);
+        anx = anx + n[0]; any = any + n[1]; anz = anz + n[2]; addCnt++;
       }
-      if (dist <= cfr) { collisionColliderId = i; collisionNormal = M.add(collisionNormal, n); mindist = Math.min(mindist, dist); }
+      if (dist <= cfr) { collisionColliderId = i; cnx = cnx + n[0]; cny = cny + n[1]; cnz = cnz + n[2]; mindist = Math.min(mindist, dist); }
     }
     if (addCnt > 0) {
-      addN = M.mul(addN, 1 / addCnt);
-      const len = M.length(addN);
+      const ka = 1 / addCnt;
+      anx = anx * ka; any = any * ka; anz = anz * ka;
+      const len = Math.sqrt(anx * anx + any * any + anz * anz);
       if (len > M.EPSILON) {
         const t = Math.min(len, 1) / addCnt;
-        addFloat3(e0, M.mul(add0, t), cnt, vecA);
-        addFloat3(e1, M.mul(add1, t), cnt, vecA);
+        addFloat3(e0, [a0x * t, a0y * t, a0z * t], cnt, vecA);
+        addFloat3(e1, [a1x * t, a1y * t, a1z * t], cnt, vecA);
       }
     }
-    if (collisionColliderId >= 0 && cfr > 0 && M.lengthsq(collisionNormal) > 1e-6) {
+    if (collisionColliderId >= 0 && cfr > 0 && cnx * cnx + cny * cny + cnz * cnz > 1e-6) {
       const friction = 1 - M.saturate(mindist / cfr);
       interlockMax(e0, friction, fpt);
       interlockMax(e1, friction, fpt);
-      collisionNormal = M.normalize(collisionNormal);
+      const kc = 1 / Math.sqrt(cnx * cnx + cny * cny + cnz * cnz);   // M.normalize
+      const collisionNormal = [cnx * kc, cny * kc, cnz * kc];
       addFloat3(e0, collisionNormal, null, vecB);
       addFloat3(e1, collisionNormal, null, vecB);
     }
@@ -314,13 +358,14 @@ export function solveEdgeCollision(s, team, colliders) {
   for (let v = 0; v < s.count; v++) {
     const c = cnt[v];
     if (c > 0) {
-      const k = v * 3;
-      s.nextPos[v] = M.add(s.nextPos[v], [(vecA[k] / c) * TO_FLOAT, (vecA[k + 1] / c) * TO_FLOAT, (vecA[k + 2] / c) * TO_FLOAT]);
+      const k = v * 3, np = s.nextPos[v];
+      s.nextPos[v] = [np[0] + (vecA[k] / c) * TO_FLOAT, np[1] + (vecA[k + 1] / c) * TO_FLOAT, np[2] + (vecA[k + 2] / c) * TO_FLOAT];
     }
     const f = fpt[v] * TO_FLOAT;
     if (f > 0 && f > s.friction[v]) s.friction[v] = f;
-    const n = readFloat3(v, vecB);
-    if (M.lengthsq(n) > 0) s.collisionNormal[v] = M.normalize(n);
+    const k3 = v * 3, nx = vecB[k3] * TO_FLOAT, ny = vecB[k3 + 1] * TO_FLOAT, nz = vecB[k3 + 2] * TO_FLOAT;   // readFloat3
+    const nsq = nx * nx + ny * ny + nz * nz;
+    if (nsq > 0) { const kn = 1 / Math.sqrt(nsq); s.collisionNormal[v] = [nx * kn, ny * kn, nz * kn]; }
     vecA[v * 3] = vecA[v * 3 + 1] = vecA[v * 3 + 2] = 0;
     vecB[v * 3] = vecB[v * 3 + 1] = vecB[v * 3 + 2] = 0;
     cnt[v] = 0; fpt[v] = 0;
