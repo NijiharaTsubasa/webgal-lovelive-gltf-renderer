@@ -59,21 +59,112 @@
 | `damping` | number | 0–1 的阻尼强度，含义同摆动骨 |
 | `gravity` | number[3] | 世界坐标中的外力方向与强度向量 |
 | `colliders` | integer[] | 当前 `physics.colliders` 的索引，仅与列出的碰撞体交互 |
-| `proxy` | object | 可选，来源资产的代理网格划分，见下文 |
 
-除 `proxy` 外每项字段均必需，数值有限。同一节点的同一 primitive 只声明一次；至少有一个固定点，索引不得重复或越界。固定点必须被该 primitive 的三角形使用。未固定的布面顶点参与求解，三角形定义布面的连接关系；纹理或法线接缝的顶点副本不应因此变成裂口。渲染网格仍保留原有 UV、材质和蒙皮绑定，不得将一次仿真结果永久改写为参考网格。
+每项字段均必需，数值有限。同一节点的同一 primitive 只声明一次；至少有一个固定点，索引不得重复或越界。固定点必须被该 primitive 的三角形使用。未固定的布面顶点参与求解，三角形定义布面的连接关系；纹理或法线接缝的顶点副本不应因此变成裂口。渲染网格仍保留原有 UV、材质和蒙皮绑定，不得将一次仿真结果永久改写为参考网格。
 
 `radius` 是布面的碰撞间隙，不等于来源资产代理粒子的半径。回正、阻尼及外力同样是通用调节量；伸展、弯曲约束的具体构造和迭代次数由求解器决定，不属于本格式。
 
-#### 代理网格 `proxy`
+### 来源原版物理 `source`（可选）
 
-布面可以只模拟一组稀疏的代理粒子，再把渲染顶点按权重跟随代理变形。`proxy` 声明来源资产自己的代理划分：
+上面的字段是与求解器无关的通用描述。`source` 保存来源游戏**原样的**物理组件数据，并配套原算法求解器。凡是 `source` 驱动的节点，不得再出现在 `springs` 中。
+
+`source` 的求解器和游戏一样在动画之后运行、从当帧动画姿态出发，所以可以驱动 Avatar 映射为 Humanoid 骨的节点：莲之空有 7 套服装把 Jaw 映射到前刘海的弹簧骨（如 `TsuTsA_SP_HairFront01_01`），游戏里 Animator 先写它，SpringBone 再在 LateUpdate 里把它当作皮肤姿态、用弹簧结果覆盖（游戏从不调用 `UpdateBoneIsAnimatedStates`，混合比例恒为 1）。`springs` 仍不得驱动核心骨。
+
+#### `source.unitySpringBone`：UnityChan SpringBone
+
+用于莲之空等使用 UnityChan SpringBone（Unity.Animations.SpringBones）的模型。求解器是 `src/unity-springbone.js`：逐函数对照游戏代码移植，与参考实现逐帧一致。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `vertices` | integer[] | 长度等于该 primitive 的 `POSITION` 顶点数；被三角形使用的顶点给出所属代理粒子的非负编号，编号相同的顶点合并为同一粒子。未被三角形使用的顶点同样填非负整数，其值不影响结果 |
+| `transforms` | object[] | 求解涉及的 Unity Transform 及其所有祖先 |
+| `components` | object[] | `SpringManager`、`SpringBone`、`SpringBonePivot`、`SpringSphereCollider`、`SpringCapsuleCollider`、`SpringPanelCollider` 组件 |
 
-编号只表示分组，不要求连续。同一位置、同一蒙皮的焊接顶点必须属于同一粒子；包含固定点的粒子整体固定。代理三角形由渲染三角形按分组收缩得到，不另存。省略 `proxy` 时由运行时按空间距离自行划分；两种情况下，表面上互不相连、但空间上重叠或相邻的部件（荷叶边、内衬、分片建模的褶）都应合并到共同的粒子上，不能各自漂离。
+每个 `transforms[]` 项：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `id` | string | Transform 在来源资产里的 path id（十进制字符串；64 位整数不能存成 JSON number） |
+| `name` | string | Transform 名，仅供调试 |
+| `parentId` | string \| null | 父 Transform 的 `id` |
+| `siblingIndex` | integer \| null | 在父 Transform 子列表里的序号（`Transform.GetSiblingIndex`），根为 `null`；MagicaCloth2 运行时构建按它确定顶点顺序 |
+| `localPosition` / `localRotation` / `localScale` | number[3] / number[4] / number[3] | Unity 局部变换（左手系，四元数 x,y,z,w），**必须与 GLB 的静止姿态是同一个姿态** |
+| `prefabLocalPosition` / `prefabLocalRotation` / `prefabLocalScale` | 同上，可省略 | 预制体里序列化的局部变换，只在与上一行不同时给出（例如 GLB 静止姿态是烘焙出的中性姿态）。MagicaCloth2 运行时构建读的是游戏 Awake 时的姿态，也就是这一组 |
+| `node` | integer \| null | 对应的当前组件 GLB 节点索引；`null` 表示 GLB 里没有这个节点（例如被省略的 pivot、碰撞体挂点），求解器按 Unity 静止变换补出 |
+
+每个 `components[]` 项：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `class` | string | 组件类名 |
+| `transformId` | string | 所在 Transform 的 `id` |
+| `fields` | object | 组件序列化字段原样保留（`stiffnessForce`、`dragForce`、`springForce`、`angularStiffness`、`yAngleLimits`、`zAngleLimits`、`radius`、碰撞体引用等）；对其他组件的引用写成 `{ "transformId": id }` |
+
+运行时按静止姿态拟合 Unity 与 GLB 的关系：X 镜像、旋转、等比缩放、平移，每个节点再加一个常量静止朝向偏移，所以归一化过的骨架也能使用。
+
+运行语义与游戏一致：
+- 每个 60 fps 固定步执行一次所有 SpringManager 的 LateUpdate；积分步长固定为 `1 / simulationFrameRate`，不随帧间隔变化；
+- 嵌套的两个 SpringManager 会把同一根骨各模拟一次；
+- `m_Enabled = 0` 的 SpringBone 不被模拟，继续跟随动画。
+
+重置（载入、切换动作、瞬移、重新启用）时，所有骨回到初始局部旋转、速度清零，再按 `reset` 的预热步数稳定。
+
+#### `source.magicaCloth2`：MagicaCloth2
+
+用于使用 MagicaCloth2 的模型（莲之空）。结构与 `unitySpringBone` 相同，也是 `transforms` 加 `components`。
+
+**`transforms`**：同上。BoneCloth 根骨以下的整条骨链都会列出。
+
+**`components`**：`MagicaCloth`、`MagicaCapsuleCollider`、`MagicaSphereCollider`、`MagicaPlaneCollider`，以及来源游戏加的 `ExtendClothSettings`。字段原样保留，只有以下几类改写。
+
+引用改写成对象：
+
+| 被引用的对象 | 写法 |
+|---|---|
+| Transform、GameObject | `{ "transformId" }` |
+| 组件 | `{ "transformId", "class" }` |
+| 蒙皮渲染器 | `{ "transformId", "class", "mesh": { "name", "node", "primitives" } }`，`node` 是 GLB 中对应的渲染节点索引。没有可用 PreBuild 的 MeshCloth，其 `sourceRenderers` 引用另带 `meshData`：原始 Unity 网格（`vertexCount`，`vertices` / `normals` / `tangents` / `uv` / `boneWeights` / `boneIndices` / `bindposes`（列主序）/ `triangles` 均为小端 `{ "base64" }`，加 `submeshTriangleCounts`、`bones`、`rootBone` 的 transform id）。GLB 网格不能代替：做过镜像、重新绑到归一化骨架、V 翻转 |
+| Mesh | `{ "mesh": { … } }` |
+| 资产（ScriptableObject） | `{ "asset", "class" }` |
+| 贴图 | `{ "texture" }` |
+
+原始字节数组写成 `{ "base64" }`：包括 `ExSimpleNativeArray` 的 `arrayBytes`，以及 VirtualMesh、RenderSetupData 的 `byte[]` 字段。内容是 MagicaCloth2 序列化时的小端结构体原样。`ExSimpleNativeArray` 只有前 `count` 个元素有效（容量可能更大）。ulong 数组（三角弯曲的 `trianglePairArray`）也写成小端 uint64 的 `{ "base64" }`，因为 JSON 数字放不下 2^53 以上的位。
+
+浮点数是 float32 值的最短十进制写法，用 `Math.fround` 即可还原出精确的 float32。
+
+PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
+- `enabled`、`buildId`、`uniquePreBuildData` 照原样保留；
+- `preBuildScriptableObject` 写成 `{ "asset", "class" }`；
+- 该资产里 `buildId` 相同的那一项 SharePreBuildData 嵌入为 `sharePreBuildData`，包括代理网格、渲染映射、距离 / 弯曲 / 惯性约束数据；
+- `sharePreBuildData.renderSetupDataList` 省略了原始网格的整份拷贝（顶点、法线、切线、绑定矩阵、蒙皮权重），因为 GLB 里有这个网格，渲染顶点到代理点的映射和网格空间顶点在 `renderMeshList` 里。
+
+**`runtimePreBuild`**（可选，在 `MagicaCloth` 组件上，与 `fields` 并列）：没有可用 PreBuild 的布料，在转换时预先跑一遍游戏的运行时构建，结果放在这里，渲染器加载时就不用再构建。由渲染器的 `src/magica-cloth2/prebuild.js` 生成，转换器通过 `tools/prebuild-magica-cloth2.mjs` 调用它：
+- 结构是 `{ "version": 1, "sharePreBuildData", "uniquePreBuildData" }`，编码与上面的 PreBuild 数据相同，但只包含渲染器读取的字段：代理网格、渲染映射（`renderMeshList`，以及 `uniquePreBuildData.renderSetupDataList[i].renderer` 这个渲染器引用）、距离 / 弯曲约束、惯性约束的 `initLocalGravityDirection`；
+- 距离约束的 `indexArray` / `dataArray` / `distanceArray`，以及弯曲约束的 `restAngleOrVolumeArray` / `signOrVolumeArray`，写成小端 `{ "base64" }`（uint32 / uint16 / float32 / float32 / int8），不是游戏数据里的 JSON 数字数组；
+- 生成了 `runtimePreBuild` 的 MeshCloth 会去掉 `meshData`，因为只有构建才需要它；
+- 解码结果与加载时构建的结果逐位相同。`version` 不认识时，渲染器忽略这份数据，退回加载时构建；
+- 构建代码修正后，需要重新转换才能更新这份数据。
+
+渲染器用移植的 MagicaCloth2 求解器（`src/magica-cloth2/`，按 v2.16.0 源码逐函数移植）模拟布料，按游戏版本（约 2.10）和游戏设置运行：
+- 每个渲染帧（1/60 s）在所有 LateUpdate 之后（SpringBone、辅助骨、`afterPhysics` 之后）运行一次；模拟频率 50 Hz，每帧最多 5 步（游戏的 `MagicaClothCalculate.SetSimulationSettings`）；
+- 显示位置预测不带 2.11.1 加入的离根距离限幅（`MaxDistanceRatioFutuerPrediction`）；
+- 帧开始时 BoneCloth 骨回到初始局部姿态（`RestoreTransform`），动作随后可以覆盖；移动骨写局部位置和旋转，固定骨写世界旋转；
+- MeshCloth 把映射网格的非固定顶点写回渲染网格：按当帧蒙皮矩阵反算到网格空间，显示出来正好是求解得到的世界位置，法线同步；
+- 惯性 anchor：游戏在运行时把每个布料的 anchor 设成角色根（`MagicaClothController.SetAnchor`，`anchorInertia` 全为 0），整个角色的移动不产生布料惯性。渲染器用 transform 表的根（预制体根，和角色根刚性相连）作 anchor；
+- 更新模式 Normal、Unscaled、AnimatorLinkage 都按 Normal 运行（渲染器没有 Unity 的时间缩放和 FixedUpdate）；
+- Unity 与 three.js 坐标的关系和 `unitySpringBone` 一样由静止姿态拟合；
+- 转换器为 MagicaCloth 保留的通用 `springs` / `cloths` 是后备：受支持的布料列出的每根骨上的后备 spring 都丢弃，包括被选择数据标为无效（属性 0）的骨。游戏的 MagicaCloth 不读也不写无效骨，它只跟随动画（例如 2004104201 背后飘带的根骨：选择数据只让末端点移动，飘带本身在游戏里不动）。
+
+代理网格的来源：
+- 有 PreBuild 数据时直接用；
+- 否则有 `runtimePreBuild` 时直接用（转换时已按下面两条构建好）；
+- 没有 PreBuild 的 BoneCloth 在解码时按游戏的运行时构建生成（`src/magica-cloth2/build.js`：RenderSetupData → ImportBoneType 的四种连接方式 → 去重三角形 → 选择数据 → ConvertProxyMesh → 距离 / 弯曲 / 惯性约束，包括自定义蒙皮），读预制体姿态（`prefabLocal*`）和子节点顺序（`siblingIndex`）。顺序取决于 C# HashSet 与 Unity.Collections 散列容器的遍历顺序，`native-hash.js` 照样复现；法线调整用游戏版本（2.13.0 之前）的算法，与 v2.16 源码不同；
+- 没有 PreBuild 的 MeshCloth 在解码时从原始网格构建（`src/magica-cloth2/build-mesh.js`）：渲染网格导入并按预制体姿态蒙皮一次 → 按选择数据裁剪 → 并入代理网格 → 减面（SameDistance、SimpleDistance、ShapeDistance，再重组）→ 去重三角形、选择数据、ConvertProxyMesh（MeshCloth 基线）→ 渲染顶点到代理的直接映射 → 约束。需要转换器给渲染器引用加的 `meshData`。减面要排序代价相同的边（Unity.Collections 的 introsort，已照游戏二进制核对），平局的结果取决于浮点 ulp，所以代理顶点的编号不一定和游戏一致；合并点都取中点，形状和约束与游戏相同或几乎相同。
+
+参数曲线（AnimationCurve）支持不带权重的关键帧，以及权重为默认 1/3 的带权重关键帧：两侧时间柄都是区间的 1/3 时，加权贝塞尔与 Hermite 插值完全相同（游戏数据里唯一的带权重关键帧是 11 套 3033 服装裙摆的 `backstopDistance`，权重都是 1/3）。其他权重不支持。
+
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild、`runtimePreBuild` 和 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、参数曲线有非默认权重的关键帧、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
+
+转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 
 ## 2. 运行语义
 
