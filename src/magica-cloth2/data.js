@@ -67,11 +67,25 @@ const quat = (o) => [o.value.x, o.value.y, o.value.z, o.value.w];
 const mat4 = (o) => [o.c0, o.c1, o.c2, o.c3].flatMap((c) => [c.x, c.y, c.z, c.w]);
 
 // ------------------------------------------------------------------ AnimationCurve / parameters
-/** UnityEngine.AnimationCurve.Evaluate for non-weighted keys (the only kind in the game data). */
+// WeightedMode: None 0, In 1, Out 2, Both 3.  A weighted segment is a 2D cubic Bezier whose time handles are
+// weight * dx long (an unweighted side counts as 1/3).  With 1/3 on both sides the time handles sit at dx / 3 and
+// 2 dx / 3, the Bezier's time is linear in its parameter and the curve is exactly the Hermite below.  The game data
+// only has weighted keys with the default 1/3 (11 skirts, backstopDistance); other weights would need the Bezier.
+const DEFAULT_WEIGHT = Math.fround(1 / 3);
+const defaultWeight = (w) => Math.abs(w - DEFAULT_WEIGHT) <= 1e-6;
+function checkWeights(keys) {
+  for (let i = 0; i + 1 < keys.length; i++) {
+    const a = keys[i], b = keys[i + 1];
+    if (((a.weightedMode ?? 0) & 2) && !defaultWeight(a.outWeight)) throw new Error(`MagicaCloth2: AnimationCurve out-weight ${a.outWeight} is not supported (only the default 1/3)`);
+    if (((b.weightedMode ?? 0) & 1) && !defaultWeight(b.inWeight)) throw new Error(`MagicaCloth2: AnimationCurve in-weight ${b.inWeight} is not supported (only the default 1/3)`);
+  }
+}
+
+/** UnityEngine.AnimationCurve.Evaluate for unweighted keys and weighted keys with the default 1/3 weights. */
 export function evaluateAnimationCurve(curve, time) {
   const keys = curve.m_Curve;
   if (!keys.length) return 0;
-  if (keys.some((k) => k.weightedMode)) throw new Error("MagicaCloth2: weighted AnimationCurve keys are not supported");
+  checkWeights(keys);
   if (time <= keys[0].time) return keys[0].value;                 // (game curves: clamp, keys span [0, 1])
   const last = keys[keys.length - 1];
   if (time >= last.time) return last.value;

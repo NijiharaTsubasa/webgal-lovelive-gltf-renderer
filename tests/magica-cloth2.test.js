@@ -71,6 +71,21 @@ test("MagicaCloth2 parameters follow GetClothParameters (curves, 20 % damping / 
   assert.deepEqual(simulationPower(50).map((x) => +x.toFixed(6)), [1.8, +Math.sqrt(1.8).toFixed(6), +Math.pow(1.8, 0.3).toFixed(6), +Math.pow(1.8, 1.8).toFixed(6)]);
 });
 
+test("MagicaCloth2 curves: weighted keys with the default 1/3 weights evaluate exactly like unweighted keys", () => {
+  // motionConstraint.backstopDistance of the 3033 skirts (the only weighted keys in the game data)
+  const keys = (mode) => ({ m_Curve: [
+    { time: 0, value: 0, inSlope: 1, outSlope: 0.26190475, weightedMode: 0, inWeight: 0, outWeight: 0.33333334 },
+    { time: 0.63157894, value: 0.16540799, inSlope: 0.26190475, outSlope: 2.265021, weightedMode: mode, inWeight: 0.33333334, outWeight: 0.33333334 },
+    { time: 1, value: 1, inSlope: 2.265021, outSlope: 1, weightedMode: 0, inWeight: 0.33333334, outWeight: 0 }] });
+  const plain = keys(0), weighted = keys(3);
+  for (let i = 0; i <= 100; i++) assert.equal(evaluateAnimationCurve(weighted, i / 100), evaluateAnimationCurve(plain, i / 100));
+  const odd = keys(3);
+  odd.m_Curve[1].outWeight = 0.5;
+  assert.throws(() => evaluateAnimationCurve(odd, 0.8), /out-weight/);
+  odd.m_Curve[1].weightedMode = 1;   // only the in side is weighted: the odd out weight is ignored, as in Unity
+  assert.equal(evaluateAnimationCurve(odd, 0.8), evaluateAnimationCurve(plain, 0.8));
+});
+
 test("MagicaCloth2 time: 50 simulation steps per 60 frames, at most 5 per frame", () => {
   const team = createTeam({ initScale: [1, 1, 1], centerTransformIndex: 0 }, { inertiaConstraint: {} }, { initLocalGravityDirection: [0, -1, 0] });
   let steps = 0;
@@ -260,6 +275,30 @@ test("ModelPhysics runs MagicaCloth2 after the other physics and drops the gener
 // 3d_costume_3020103101 trimmed to two BoneCloths with custom skinning: SleeveR (SequentialNonLoopMesh) and
 // SleeveRibbon (AutomaticMesh)
 const fixture2 = () => JSON.parse(readFileSync(new URL("./fixtures/magica-cloth2/3d_costume_3020103101.json", import.meta.url), "utf8"));
+
+test("ModelPhysics: a bone a MagicaCloth2 cloth leaves invalid follows the animation, its fallback spring is dropped", () => {
+  // 2004104201's back ribbon: the selection data marks the root invalid and only the end point movable, so the game's
+  // MagicaCloth never moves the skinned root.  Reproduced on the necktie: chain 02's root invalid, its end movable.
+  const source = fixture();
+  const tie = source.components.filter((c) => c.class === "MagicaCloth")[2];
+  delete tie.fields.serializeData2.preBuildData;
+  tie.fields.serializeData2.selectionData.attributes[0] = { Value: 0 };
+  const { root, resolve, resolvePrimitive } = sceneFor(source);
+  const def = decodeMagicaCloth2(source).cloths.find((c) => c.transformId === tie.transformId);
+  const v = def.proxy.attr.findIndex((a, i) => a === 0 && def.proxy.parent.some((p, j) => p === i && (def.proxy.attr[j] & 0x02)));
+  assert.ok(v >= 0, "an invalid bone with a movable child");
+  const node = source.transforms.findIndex((t) => t.id === def.proxy.transformIds[v]);
+  const physics = { colliders: [], springs: [{ node, tail: [0, -0.1, 0], radius: 0, stiffness: 1, damping: 0.5, gravity: [0, 0, 0], colliders: [] }],
+    source: { magicaCloth2: source } };
+  const model = new ModelPhysics(root, [{ physics, resolve, resolvePrimitive }]);
+  assert.equal(model.records.length, 0, "no fallback spring on the invalid bone");
+  assert.ok(!model.sourceMagica[0].drivenObjects.includes(resolve(node)) && model.sourceMagica[0].coveredObjects.includes(resolve(node)));
+  const target = resolve(node), rest = target.quaternion.clone();
+  for (let f = 0; f < 60; f++) model.advance(1 / 60, () => { root.position.x = 0.2 * Math.sin(2 * Math.PI * f / 60); root.updateMatrixWorld(true); });
+  assert.ok(target.quaternion.angleTo(rest) < 1e-6, "the invalid bone keeps its animated (rest) rotation");
+  model.destroy();
+});
+
 const b64Ints = (f, size) => {
   if (Array.isArray(f)) return f.flatMap((k) => (typeof k === "object" ? [k.x, k.y] : [k]));
   const b = Buffer.from(f.base64, "base64"), v = new DataView(b.buffer, b.byteOffset, b.byteLength);

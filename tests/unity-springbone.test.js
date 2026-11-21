@@ -127,6 +127,33 @@ test("ModelPhysics drives source SpringBone data through a re-oriented, mirrored
   void rest;
 });
 
+test("source SpringBone may drive a node the Avatar maps as a Humanoid bone, replacing its animated pose like the game", () => {
+  // 7 costumes map Jaw to a front-hair spring bone; the game's Animator writes it, then SpringBone replaces it
+  const run = (animateJaw) => {
+    const { root, objects, nodeOf, data } = buildThreeCostume(doc);
+    const ref = SpringRig.fromJSON(doc);
+    const jaw = objects[nodeOf.get(ref.drivenIds[0])];
+    jaw.name = "Jaw";
+    const model = new ModelPhysics(root, [{ physics: { colliders: [], springs: [], source: { unitySpringBone: data } }, resolve: (index) => objects[index] }]);
+    const rootObject = objects[nodeOf.get(rootIdOf(ref))];
+    const out = [];
+    for (let frame = 0; frame < 60; frame++) {
+      model.advance(1 / 60, () => {
+        rootObject.rotation.y = 0.4 * Math.sin(frame / 8);
+        // (from the second frame: the first one resets and settles the springs at the pose it finds)
+        if (animateJaw && frame > 0) jaw.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0.3 * Math.sin(frame / 3));
+      });
+      out.push(jaw.quaternion.clone());
+    }
+    model.destroy();
+    return out;
+  };
+  const still = run(false), animated = run(true);
+  // (angleTo's acos turns float rounding of identical results into ~1e-8 rad)
+  assert.ok(still.every((q, i) => q.angleTo(animated[i]) < 1e-6), "the spring result does not depend on the animated value");
+  assert.ok(still.some((q) => q.angleTo(still[0]) > 1e-4), "the bone is simulated");
+});
+
 test("source SpringBone validation and node ownership", () => {
   const bad = structuredClone(doc);
   bad.transforms[0].localRotation = [0, 0, 1];

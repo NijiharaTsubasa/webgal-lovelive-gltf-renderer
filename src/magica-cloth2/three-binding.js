@@ -70,6 +70,18 @@ export class MagicaClothBinding {
       });
     }
     this.bones.sort((a, b) => h.depth(a.id) - h.depth(b.id));
+    // Every bone a supported BoneCloth lists, including those its selection data leaves invalid: the game's
+    // MagicaCloth neither reads nor writes an invalid bone, so it simply follows the animation (2004104201's back
+    // ribbon root).  No fallback physics may take these bones either.
+    const sourceNode = new Map(source.transforms.map((t) => [t.id, t.node]));
+    this.covered = new Set(this.bones.map((b) => b.node));
+    for (const team of this.teams) {
+      if (!team.proxy.isBoneCloth) continue;
+      for (const id of team.proxy.transformIds.slice(0, team.proxy.count)) {
+        const node = this.nodes.get(id) ?? (sourceNode.get(id) !== null && sourceNode.get(id) !== undefined ? resolve(sourceNode.get(id)) : null);
+        if (node) this.covered.add(node);
+      }
+    }
     // MeshCloth: render meshes
     this.meshes = [];
     for (const team of this.teams) {
@@ -91,6 +103,9 @@ export class MagicaClothBinding {
 
   /** three.js objects whose transform the solver writes. */
   get drivenObjects() { return this.bones.map((b) => b.node); }
+
+  /** drivenObjects plus the BoneCloth bones left invalid by their selection data (animation only, no physics). */
+  get coveredObjects() { return [...this.covered]; }
 
   _rootLocalPos(o) { return tmpV.setFromMatrixPosition(o.matrixWorld).applyMatrix4(this._rootInv).toArray(); }
   _rootLocalQuat(o) {

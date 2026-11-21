@@ -68,6 +68,8 @@
 
 上面的字段是与求解器无关的通用描述。`source` 保存来源游戏**原样的**物理组件数据，并配套原算法求解器。凡是 `source` 驱动的节点，不得再出现在 `springs` 中。
 
+`source` 的求解器和游戏一样在动画之后运行、从当帧动画姿态出发，所以可以驱动 Avatar 映射为 Humanoid 骨的节点：莲之空有 7 套服装把 Jaw 映射到前刘海的弹簧骨（如 `TsuTsA_SP_HairFront01_01`），游戏里 Animator 先写它，SpringBone 再在 LateUpdate 里把它当作皮肤姿态、用弹簧结果覆盖（游戏从不调用 `UpdateBoneIsAnimatedStates`，混合比例恒为 1）。`springs` 仍不得驱动核心骨。
+
 #### `source.unitySpringBone`：UnityChan SpringBone
 
 用于莲之空等使用 UnityChan SpringBone（Unity.Animations.SpringBones）的模型。求解器是 `src/unity-springbone.js`：逐函数对照游戏代码移植，与参考实现逐帧一致。
@@ -149,7 +151,8 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 - MeshCloth 把映射网格的非固定顶点写回渲染网格：按当帧蒙皮矩阵反算到网格空间，显示出来正好是求解得到的世界位置，法线同步；
 - 惯性 anchor：游戏在运行时把每个布料的 anchor 设成角色根（`MagicaClothController.SetAnchor`，`anchorInertia` 全为 0），整个角色的移动不产生布料惯性。渲染器用 transform 表的根（预制体根，和角色根刚性相连）作 anchor；
 - 更新模式 Normal、Unscaled、AnimatorLinkage 都按 Normal 运行（渲染器没有 Unity 的时间缩放和 FixedUpdate）；
-- Unity 与 three.js 坐标的关系和 `unitySpringBone` 一样由静止姿态拟合。
+- Unity 与 three.js 坐标的关系和 `unitySpringBone` 一样由静止姿态拟合；
+- 转换器为 MagicaCloth 保留的通用 `springs` / `cloths` 是后备：受支持的布料列出的每根骨上的后备 spring 都丢弃，包括被选择数据标为无效（属性 0）的骨。游戏的 MagicaCloth 不读也不写无效骨，它只跟随动画（例如 2004104201 背后飘带的根骨：选择数据只让末端点移动，飘带本身在游戏里不动）。
 
 代理网格的来源：
 - 有 PreBuild 数据时直接用；
@@ -157,7 +160,9 @@ PreBuild 数据嵌在 `serializeData2.preBuildData` 里：
 - 没有 PreBuild 的 BoneCloth 在解码时按游戏的运行时构建生成（`src/magica-cloth2/build.js`：RenderSetupData → ImportBoneType 的四种连接方式 → 去重三角形 → 选择数据 → ConvertProxyMesh → 距离 / 弯曲 / 惯性约束，包括自定义蒙皮），读预制体姿态（`prefabLocal*`）和子节点顺序（`siblingIndex`）。顺序取决于 C# HashSet 与 Unity.Collections 散列容器的遍历顺序，`native-hash.js` 照样复现；法线调整用游戏版本（2.13.0 之前）的算法，与 v2.16 源码不同；
 - 没有 PreBuild 的 MeshCloth 在解码时从原始网格构建（`src/magica-cloth2/build-mesh.js`）：渲染网格导入并按预制体姿态蒙皮一次 → 按选择数据裁剪 → 并入代理网格 → 减面（SameDistance、SimpleDistance、ShapeDistance，再重组）→ 去重三角形、选择数据、ConvertProxyMesh（MeshCloth 基线）→ 渲染顶点到代理的直接映射 → 约束。需要转换器给渲染器引用加的 `meshData`。减面要排序代价相同的边（Unity.Collections 的 introsort，已照游戏二进制核对），平局的结果取决于浮点 ulp，所以代理顶点的编号不一定和游戏一致；合并点都取中点，形状和约束与游戏相同或几乎相同。
 
-不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild、`runtimePreBuild` 和 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
+参数曲线（AnimationCurve）支持不带权重的关键帧，以及权重为默认 1/3 的带权重关键帧：两侧时间柄都是区间的 1/3 时，加权贝塞尔与 Hermite 插值完全相同（游戏数据里唯一的带权重关键帧是 11 套 3033 服装裙摆的 `backstopDistance`，权重都是 1/3）。其他权重不支持。
+
+不支持的情况会在 `MagicaClothBinding.report.unsupported` 里列出原因，该布料不模拟：没有 PreBuild、`runtimePreBuild` 和 `meshData` 的 MeshCloth、用贴图选择顶点的 MeshCloth、根骨全部缺失的 BoneCloth（游戏也不构建）、参数曲线有非默认权重的关键帧、负缩放、序列化的 anchor、自碰撞、UnityPhysics 更新模式、多 primitive 的渲染网格。
 
 转换器同时输出通用的 `springs` / `cloths` 作为后备。渲染器跳过 MagicaCloth2 已经接管的骨和网格上的后备数据，不支持的布料继续使用后备数据。
 

@@ -214,11 +214,15 @@ export class ModelPhysics {
         const binding = new MagicaClothBinding(magicaSource, root, {
           resolve, resolvePrimitive: resolvePrimitive ?? ((index, primitive) => primitiveMesh(resolve(index), primitive)),
         });
+        // Like the game, the source-faithful solvers run after the animation and start from the animated pose, so they
+        // may drive a node the Avatar maps as a Humanoid bone (the game itself does: see SpringBone below).
         for (const node of binding.drivenObjects) {
           if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
-          if (HUMANOID_BONE_NAMES.has(node.name)) throw new Error(`physics 不得覆盖 Humanoid 核心骨 ${node.name}`);
-          owned.add(node); magicaNodes.add(node);
+          owned.add(node);
         }
+        // the fallback springs are dropped on every bone a supported cloth lists, also the ones its selection leaves
+        // invalid: the game simulates none of those, they follow the animation
+        for (const node of binding.coveredObjects) magicaNodes.add(node);
         for (const m of binding.meshes) this.magicaMeshes.add(m.mesh);
         this.sourceMagica.push(binding);
       }
@@ -306,9 +310,12 @@ export class ModelPhysics {
         for (const t of source.transforms) if (t.node !== undefined && t.node !== null) byId.set(t.id, resolve(t.node));
         const binding = new SpringBoneBinding(rig, root, { find: (name, scope, id) => byId.get(id) ?? null });
         const objects = binding.drivenObjects;
+        // A SpringBone may sit on a node the Avatar maps as a Humanoid bone: 7 costumes map Jaw to a front-hair spring
+        // bone (TsuTsA_SP_HairFront01_01 ...).  In the game the Animator writes it, then SpringBone (LateUpdate) takes
+        // that as its skin pose and replaces it with the spring result (dynamic ratio 1).  This solver does the same
+        // after the animation here, so the bone is not protected.
         for (const node of objects) {
           if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
-          if (HUMANOID_BONE_NAMES.has(node.name)) throw new Error(`physics 不得覆盖 Humanoid 核心骨 ${node.name}`);
           owned.add(node);
         }
         this.sourceSprings.push({ rig, binding, objects, base: objects.map((node) => node.quaternion.clone()) });
