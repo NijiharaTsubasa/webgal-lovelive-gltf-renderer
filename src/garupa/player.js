@@ -1,4 +1,5 @@
 import { createWebgalExpression } from './expression.js';
+import { readMotionSourceId, sourceEyeOpen, sourceEyeOpenMaximum } from './source-eye-opening.js';
 
 // Parameter storage is authored here; curve sampling and queue fades are
 // delegated to the host's real Cubism 2 runtime, never reimplemented from Core.
@@ -54,6 +55,8 @@ export class ParameterPlayer {
     this.baseline = { ...defaults }; this.parameters = { ...defaults };
     this.motionQueue = new runtime.MotionQueueManager();
     this.expressionQueue = new runtime.MotionQueueManager();
+    this.motionSourceId = null;
+    this.eyeOpen = { L: 1, R: 1 };
     this.time = 0; this.blink = 0; this.speech = null; this.motionUpdated = false;
   }
   withClock(operation) {
@@ -68,18 +71,24 @@ export class ParameterPlayer {
   }
   setMotion(text, definition = {}) {
     return this.withClock(() => {
-    // Prepare before replacing a valid playing queue.
-    let motion = null;
-    if (text !== null) {
-      const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n|\r|\n/g, '\r\n');
-      const bytes = new TextEncoder().encode(normalized.endsWith('\r\n') ? normalized : `${normalized}\r\n`);
-      motion = this.runtime.Live2DMotion.loadMotion(new DataView(bytes.buffer));
-      motion.setFadeIn(definition.fade_in > 0 ? definition.fade_in : 500);
-      motion.setFadeOut(definition.fade_out > 0 ? definition.fade_out : 500);
-    }
-    this.motionQueue.stopAllMotions();
-    this.motion = motion;
-    if (motion) this.motionQueue.startMotion(motion);
+      // Prepare before replacing a valid playing queue.
+      let motion = null;
+      let sourceId = null;
+      if (text !== null) {
+        const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n|\r|\n/g, '\r\n');
+        sourceId = readMotionSourceId(normalized);
+        const tracks = normalized.replace(/^[\t ]*PARAM_IMPORT[\t ]*=[^\r\n]*(?:\r\n|$)/gm, '');
+        const bytes = new TextEncoder().encode(tracks.endsWith('\r\n') ? tracks : `${tracks}\r\n`);
+        motion = this.runtime.Live2DMotion.loadMotion(new DataView(bytes.buffer));
+        motion.setFadeIn(definition.fade_in > 0 ? definition.fade_in : 500);
+        motion.setFadeOut(definition.fade_out > 0 ? definition.fade_out : 500);
+      }
+      this.motionQueue.stopAllMotions();
+      this.motion = motion;
+      this.motionSourceId = sourceId;
+      const openMaximum = sourceEyeOpenMaximum(sourceId) ?? 1.5;
+      for (const side of ['L', 'R']) this.store.ranges[`PARAM_EYE_${side}_OPEN`].max = openMaximum;
+      if (motion) this.motionQueue.startMotion(motion);
     });
   }
   setExpression(json) {
@@ -103,6 +112,10 @@ export class ParameterPlayer {
     if (!this.motionUpdated) for (const side of ['L', 'R']) this.store.multParamFloat(`PARAM_EYE_${side}_OPEN`, 1 - this.blink);
     if (this.speech !== null) this.store.setParamFloat('PARAM_MOUTH_OPEN_Y', this.speech);
     this.parameters = Object.freeze({ ...this.store.values });
+    for (const side of ['L', 'R']) {
+      this.eyeOpen[side] = sourceEyeOpen(this.motionSourceId, side,
+        this.parameters[`PARAM_EYE_${side}_OPEN`], this.parameters[`PARAM_EYE_${side}_SMILE`]);
+    }
     return this.parameters;
     });
   }

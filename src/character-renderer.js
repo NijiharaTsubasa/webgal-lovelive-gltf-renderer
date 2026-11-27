@@ -126,7 +126,7 @@ export class CharacterRenderer {
     if (!adapter) return false;
     const player = this.parameterPlayer;
     this.setExternalExpressionDriver({ beginFrame: () => adapter.restore(),
-      update: delta => adapter.apply(player.parameters, { time: player.time, delta }),
+      update: delta => adapter.apply(player.parameters, { time: player.time, delta, eyeOpen: player.eyeOpen }),
       dispose: () => adapter.dispose() });
     this.parameterFaceActive = true;
     return true;

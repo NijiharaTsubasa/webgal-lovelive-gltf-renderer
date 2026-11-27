@@ -104,3 +104,45 @@ test('parameter animation retains saved values between queue samples until expli
   player.update(.1);
   assert.equal(player.parameters.PARAM_EYE_L_OPEN, .69);
 });
+
+test('source eye opening uses the composed parameter frame and follows motion changes', () => {
+  const sdk = runtime();
+  sdk.Live2DMotion.loadMotion = (bytes) => {
+    assert.doesNotMatch(new TextDecoder().decode(bytes), /PARAM_IMPORT/);
+    return {
+      setFadeIn() {},
+      setFadeOut() {},
+      update(store) {
+        store.setParamFloat('PARAM_EYE_L_OPEN', .5);
+        store.setParamFloat('PARAM_EYE_R_OPEN', 2);
+      },
+    };
+  };
+  const player = new ParameterPlayer(sdk, { defaults: {}, ranges: {} });
+  player.setMotion('PARAM_IMPORT=47');
+  player.expressionQueue.startMotion({ update(store) { store.setParamFloat('PARAM_EYE_L_SMILE', 1); } });
+  player.update(0);
+  assert.equal(player.parameters.PARAM_EYE_L_OPEN, .5);
+  assert.equal(player.parameters.PARAM_EYE_R_OPEN, 2);
+  assert.deepEqual(player.eyeOpen, { L: .559401, R: 1.275441 });
+  assert.equal(player.store.getModelContext().getParamMax('PARAM_EYE_R_OPEN'), 2);
+
+  player.motionQueue.stopAllMotions(); // The finished queue leaves its baseline.
+  player.update(0);
+  assert.equal(player.eyeOpen.L, .559401);
+
+  for (const text of ['# untagged', 'PARAM_IMPORT=47.2', 'PARAM_IMPORT=41', 'PARAM_IMPORT=42', 'PARAM_IMPORT=43', 'PARAM_IMPORT=44', 'PARAM_IMPORT=45', 'PARAM_IMPORT=51', 'PARAM_IMPORT=47\nPARAM_IMPORT=36']) {
+    player.setMotion(text);
+    player.update(0);
+    assert.deepEqual(player.eyeOpen, { L: .5, R: 2 });
+    assert.equal(player.store.getModelContext().getParamMax('PARAM_EYE_R_OPEN'), 1.5);
+  }
+
+  player.setMotion('PARAM_IMPORT=36');
+  player.update(0);
+  assert.equal(player.eyeOpen.L, .872503);
+  player.setMotion(null);
+  player.resetMotionParameters();
+  player.update(0);
+  assert.deepEqual(player.eyeOpen, { L: 1, R: 1 });
+});
