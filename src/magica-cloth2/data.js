@@ -259,7 +259,7 @@ function colliderDefinition(component) {
  * prebuilt: the game's PreBuild data; runtimeBuild: built like the game does at Start, during this decode or, with
  * runtimePreBuild, at conversion time.
  */
-export function decodeMagicaCloth2(source) {
+export function decodeMagicaCloth2(source, { meshClothEnabled = true } = {}) {
   const colliders = new Map();
   for (const c of source.components) {
     if (COLLIDER_CLASSES.has(c.class)) colliders.set(`${c.transformId}/${c.class}`, colliderDefinition(c));
@@ -268,6 +268,7 @@ export function decodeMagicaCloth2(source) {
   let hierarchy = null;
   for (const c of source.components) {
     if (c.class !== "MagicaCloth") continue;
+    if (!meshClothEnabled && c.fields.serializeData?.clothType === 0) continue;
     const pb = c.fields.serializeData2?.preBuildData;
     const cloth = { transformId: c.transformId, enabled: (c.fields.m_Enabled ?? 1) !== 0, buildId: pb?.buildId ?? null, prebuilt: false };
     try {   // a cloth that cannot be decoded is reported (error) and left to the generic fallback physics

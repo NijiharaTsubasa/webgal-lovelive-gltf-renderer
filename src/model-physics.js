@@ -151,7 +151,7 @@ export async function createModelPhysics(root, parts, { meshClothEnabled = true 
       },
     });
   }
-  const result = new ModelPhysics(root, definitions);
+  const result = new ModelPhysics(root, definitions, { meshClothEnabled });
   try {
     // generic cloths on a mesh the MagicaCloth2 port already simulates are its fallback data: drop them
     const generic = !meshClothEnabled || !result.magicaMeshes.size ? definitions : definitions.map((d) => ({ ...d, physics: { ...d.physics,
@@ -169,7 +169,7 @@ export async function createModelPhysics(root, parts, { meshClothEnabled = true 
 
 /** Generic secondary motion. Source-game solvers and names are intentionally absent. */
 export class ModelPhysics {
-  constructor(root, definitions) {
+  constructor(root, definitions, { meshClothEnabled = true } = {}) {
     this.root = root;
     this.enabled = true;
     this.records = [];
@@ -212,7 +212,9 @@ export class ModelPhysics {
       const magicaSource = physics.source?.magicaCloth2;
       if (magicaSource) {
         const binding = new MagicaClothBinding(magicaSource, root, {
-          resolve, resolvePrimitive: resolvePrimitive ?? ((index, primitive) => primitiveMesh(resolve(index), primitive)),
+          resolve,
+          resolvePrimitive: resolvePrimitive ?? ((index, primitive) => primitiveMesh(resolve(index), primitive)),
+          meshClothEnabled,
         });
         // Like the game, the source-faithful solvers run after the animation and start from the animated pose, so they
         // may drive a node the Avatar maps as a Humanoid bone (the game itself does: see SpringBone below).

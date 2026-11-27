@@ -18,10 +18,11 @@ export class MagicaClothBinding {
    * @param {object} opt
    * @param {(node:number)=>THREE.Object3D} opt.resolve                       GLB node index -> object
    * @param {(node:number, primitive:number)=>THREE.SkinnedMesh} opt.resolvePrimitive
+   * @param {boolean} [opt.meshClothEnabled=true]                            simulate mesh cloth
    */
-  constructor(source, root, { resolve, resolvePrimitive }) {
+  constructor(source, root, { resolve, resolvePrimitive, meshClothEnabled = true }) {
     this.root = root;
-    this.decoded = decodeMagicaCloth2(source);
+    this.decoded = decodeMagicaCloth2(source, { meshClothEnabled });
     const h = this.h = new Hierarchy(source.transforms);
     this.teams = [];
     this.unsupported = [];

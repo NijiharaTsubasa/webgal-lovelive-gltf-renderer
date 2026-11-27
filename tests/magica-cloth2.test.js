@@ -11,7 +11,7 @@ import { MagicaClothBinding } from "../src/magica-cloth2/three-binding.js";
 import { buildBoneCloth } from "../src/magica-cloth2/build.js";
 import { buildMeshCloth } from "../src/magica-cloth2/build-mesh.js";
 import { prebuildMagicaCloth2 } from "../src/magica-cloth2/prebuild.js";
-import { ModelPhysics } from "../src/model-physics.js";
+import { createModelPhysics, ModelPhysics } from "../src/model-physics.js";
 
 // converter physics.source.magicaCloth2 of 3d_costume_1001103101 (Kaho), trimmed to the skirt (MeshCloth, edge
 // collision, 9 colliders), back hair (BoneCloth with triangles) and necktie (BoneCloth, no colliders)
@@ -269,6 +269,40 @@ test("ModelPhysics runs MagicaCloth2 after the other physics and drops the gener
   root.updateMatrixWorld(true);
   assert.ok(target.getWorldPosition(new THREE.Vector3()).distanceTo(rest) < 1e-9, "disabled physics restores the bone");
   model.destroy();
+});
+
+test("the mesh cloth option skips MagicaCloth2 mesh decoding and binding while keeping its bone simulation", async () => {
+  for (const meshClothEnabled of [false, true]) {
+    const source = fixture();
+    const { root, objects, mesh } = sceneFor(source);
+    const physics = { colliders: [], springs: [], source: { magicaCloth2: source } };
+    const nodes = objects.map((object) => object === mesh.parent ? { mesh: 0 } : {});
+    let primitiveLookups = 0;
+    const parser = {
+      getDependencies: async () => objects,
+      associations: new Map([[mesh, { meshes: 0, primitives: 0 }]]),
+      get json() { primitiveLookups++; return { nodes }; },
+    };
+    const model = await createModelPhysics(root, [{ component: { physics }, gltf: { parser } }], { meshClothEnabled });
+    try {
+      const binding = model.sourceMagica[0];
+      const expectedMeshes = Number(meshClothEnabled);
+      assert.equal(binding.decoded.cloths.filter((cloth) => cloth.clothType === 0).length, expectedMeshes);
+      assert.equal(primitiveLookups, expectedMeshes);
+      assert.equal(model.magicaMeshes.size, expectedMeshes);
+      assert.equal(binding.teams.filter((team) => team.proxy.isBoneCloth).length, 2);
+      const initial = binding.drivenObjects.map((bone) => bone.quaternion.clone());
+      for (let frame = 0; frame < 60; frame++) {
+        model.advance(1 / 60, () => {
+          root.position.x = 0.2 * Math.sin(2 * Math.PI * frame / 60);
+          root.updateMatrixWorld(true);
+        });
+      }
+      assert.ok(binding.drivenObjects.some((bone, index) => bone.quaternion.angleTo(initial[index]) > 1e-3));
+    } finally {
+      model.destroy();
+    }
+  }
 });
 
 // ------------------------------------------------------------------ runtime BoneCloth build (no PreBuild data)
