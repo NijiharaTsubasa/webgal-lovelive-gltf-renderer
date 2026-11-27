@@ -127,6 +127,30 @@ test("physics validates only current fields and rejects invalid references", () 
   assert.throws(() => validatePhysics({ ...physics, springs: [{ ...physics.springs[0], damping: 2 }] }));
 });
 
+test("physics can omit either generic array and still checks references to it", async () => {
+  const noColliders = fixture();
+  const spring = { ...noColliders.physics.springs[0], colliders: [] };
+  const noSprings = fixture();
+  for (const [f, physics, counts] of [
+    [noColliders, { springs: [spring] }, [0, 1]],
+    [noSprings, { colliders: noSprings.physics.colliders }, [1, 0]],
+  ]) {
+    const model = await createModelPhysics(f.root, [{
+      component: { physics },
+      gltf: { parser: { getDependencies: async () => f.nodes } },
+    }]);
+    try {
+      assert.deepEqual([model.colliders.length, model.records.length], counts);
+    } finally {
+      model.destroy();
+    }
+  }
+  assert.throws(() => validatePhysics({ colliders: null }), /必须是数组/);
+  assert.throws(() => validatePhysics({ springs: null }), /必须是数组/);
+  assert.throws(() => validatePhysics({ springs: [{ ...spring, colliders: [0] }] }), /碰撞引用无效/);
+  assert.throws(() => validatePhysics({ collisionEdges: [{ springs: [0, 1], colliders: [] }] }), /碰撞边/);
+});
+
 test("cloth declarations validate mesh identity, pins and collision references", () => {
   const { physics } = fixture();
   const cloth = { node: 2, primitive: 0, fixed: [0, 1], radius: .003,

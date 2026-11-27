@@ -275,7 +275,7 @@ test("the mesh cloth option skips MagicaCloth2 mesh decoding and binding while k
   for (const meshClothEnabled of [false, true]) {
     const source = fixture();
     const { root, objects, mesh } = sceneFor(source);
-    const physics = { colliders: [], springs: [], source: { magicaCloth2: source } };
+    const physics = { source: { magicaCloth2: source } };
     const nodes = objects.map((object) => object === mesh.parent ? { mesh: 0 } : {});
     let primitiveLookups = 0;
     const parser = {

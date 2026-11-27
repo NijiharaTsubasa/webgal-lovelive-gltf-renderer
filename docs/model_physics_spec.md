@@ -4,7 +4,7 @@
 
 ## 1. 字段
 
-`physics` 包含 `colliders` 和 `springs` 两个数组，以及可选的 `collisionEdges` 和 `cloths` 数组；没有摆动骨时 `springs` 为空。所有节点引用都是**当前模型组件 GLB 的节点索引**，不得用游戏骨名推断绑定。省略 `physics` 表示不声明此能力。
+`physics` 可声明通用物理数据和原版物理数据。通用物理使用 `colliders`、`springs`、`collisionEdges` 和 `cloths` 四个可选数组，省略的数组视为空数组。通用物理的节点引用使用**当前模型组件 GLB 的节点索引**。仅使用原版物理的模型可只声明 `source`。省略 `physics` 表示不声明此能力。
 
 ### 碰撞体 `colliders[]`
 

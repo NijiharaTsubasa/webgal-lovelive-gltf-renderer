@@ -31,8 +31,10 @@ export function validatePhysics(value, source = "physics") {
   const scalar = (v, min = 0, max = Infinity) => Number.isFinite(v) && v >= min && v <= max;
   const index = (v) => Number.isSafeInteger(v) && v >= 0;
   const xyz = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
-  if (!object(value) || !Array.isArray(value.colliders) || !Array.isArray(value.springs)) fail("需要 colliders 和 springs 数组");
-  for (const c of value.colliders) {
+  if (!object(value)) fail("必须是对象");
+  const { colliders = [], springs = [] } = value;
+  if (!Array.isArray(colliders) || !Array.isArray(springs)) fail("colliders 和 springs 必须是数组");
+  for (const c of colliders) {
     if (!object(c) || !["sphere", "capsule", "plane", "panel"].includes(c.shape) || !index(c.node)
       || !xyz(c.offset)) fail("碰撞体形状、节点或偏移无效");
     if (c.shape === "plane") {
@@ -44,11 +46,11 @@ export function validatePhysics(value, source = "physics") {
     if (c.shape === "capsule" && (!object(c.tail) || !index(c.tail.node) || !xyz(c.tail.offset))) fail("胶囊需要有效 tail 端点");
   }
   const nodes = new Set();
-  for (const s of value.springs) {
+  for (const s of springs) {
     if (!object(s) || !index(s.node) || !xyz(s.tail) || Math.hypot(...s.tail) < 1e-8
       || !scalar(s.radius) || !scalar(s.stiffness) || !scalar(s.damping, 0, 1)
       || !xyz(s.gravity) || !Array.isArray(s.colliders)
-      || !s.colliders.every((i) => index(i) && i < value.colliders.length)) fail("摆动骨或碰撞引用无效");
+      || !s.colliders.every((i) => index(i) && i < colliders.length)) fail("摆动骨或碰撞引用无效");
     if (nodes.has(s.node)) fail(`重复摆动骨 ${s.node}`);
     nodes.add(s.node);
   }
@@ -61,7 +63,7 @@ export function validatePhysics(value, source = "physics") {
         || new Set(c.fixed).size !== c.fixed.length
         || !scalar(c.radius) || !scalar(c.stiffness) || !scalar(c.damping, 0, 1)
         || !xyz(c.gravity) || !Array.isArray(c.colliders)
-        || !c.colliders.every((i) => index(i) && i < value.colliders.length)) fail("布面、固定点或碰撞引用无效");
+        || !c.colliders.every((i) => index(i) && i < colliders.length)) fail("布面、固定点或碰撞引用无效");
       const key = `${c.node}/${c.primitive}`;
       if (meshes.has(key)) fail(`重复布面 ${key}`);
       meshes.add(key);
@@ -71,9 +73,9 @@ export function validatePhysics(value, source = "physics") {
     if (!Array.isArray(value.collisionEdges)) fail("collisionEdges 必须是数组");
     for (const edge of value.collisionEdges) {
       if (!object(edge) || !Array.isArray(edge.springs) || edge.springs.length !== 2
-        || !edge.springs.every((i) => index(i) && i < value.springs.length)
+        || !edge.springs.every((i) => index(i) && i < springs.length)
         || edge.springs[0] === edge.springs[1] || !Array.isArray(edge.colliders)
-        || !edge.colliders.every((i) => index(i) && i < value.colliders.length)) fail("碰撞边或碰撞引用无效");
+        || !edge.colliders.every((i) => index(i) && i < colliders.length)) fail("碰撞边或碰撞引用无效");
     }
   }
   if (value.source !== undefined) {
@@ -115,7 +117,7 @@ export async function createModelPhysics(root, parts, { meshClothEnabled = true 
     const binding = (index) => part.nodeBindings?.get(nodes[index]);
     const convertPoint = (index, point) => binding(index)
       ? vector(point).applyMatrix4(binding(index).localMatrix).toArray() : point;
-    for (const c of physics.colliders) {
+    for (const c of physics.colliders ?? []) {
       c.offset = convertPoint(c.node, c.offset);
       if (c.tail) c.tail.offset = convertPoint(c.tail.node, c.tail.offset);
       const matrix = binding(c.node)?.localMatrix;
@@ -228,7 +230,7 @@ export class ModelPhysics {
         for (const m of binding.meshes) this.magicaMeshes.add(m.mesh);
         this.sourceMagica.push(binding);
       }
-      const colliders = physics.colliders.map((definition) => {
+      const colliders = (physics.colliders ?? []).map((definition) => {
         const shape = definition.shape === "panel" ? new PhysicsPanelShape()
           : definition.shape === "plane" ? new VRMSpringBoneColliderShapePlane()
           : definition.shape === "capsule"
@@ -269,7 +271,7 @@ export class ModelPhysics {
         return record.collider;
       });
       const springs = [];   // indexed like physics.springs (null: replaced by MagicaCloth2)
-      for (const definition of physics.springs) {
+      for (const definition of physics.springs ?? []) {
         const node = resolve(definition.node);
         if (magicaNodes.has(node)) { springs.push(null); continue; }
         if (owned.has(node)) throw new Error(`physics 重复控制节点 ${node.name}`);
